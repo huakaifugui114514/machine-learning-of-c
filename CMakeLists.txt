@@ -1,0 +1,29 @@
+cmake_minimum_required(VERSION 3.10)
+project(DeepLearningFramework)
+
+# 设置 C++ 标准
+set(CMAKE_CXX_STANDARD 17)
+
+# 设置链接库的搜索路径(系统默认的)
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,/usr/lib/x86_64-linux-gnu")
+
+# 查找 Google Test
+find_package(GTest REQUIRED)
+include_directories(${GTEST_INCLUDE_DIRS})
+
+# 添加头文件路径
+include_directories(include)
+include_directories(third_party)  # 添加stb_image的路径
+
+# 收集源文件
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+file(GLOB TEST_FILES "tests/*.cpp")
+
+foreach(test_file ${TEST_FILES})
+    get_filename_component(test_name ${test_file} NAME_WE)
+    add_executable(${test_name} ${test_file} ${SOURCES})
+    target_link_libraries(${test_name} ${GTEST_LIBRARIES} pthread)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+enable_testing()
