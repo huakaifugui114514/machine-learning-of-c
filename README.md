@@ -10,6 +10,10 @@
 
 ## 构建与测试步骤
 ### 1. 运行脚本
-运行 `run.sh` 脚本可以自动完成项目的构建和测试过程。
+运行 `run_tests.sh` 脚本可以自动完成tests项目的构建和测试过程。
 ```bash
-./run.sh
+./run_tests.sh
+
+运行 `run_examples.sh` 脚本可以自动完成examples项目的构建和测试过程。
+```bash
+./run_examples.sh
