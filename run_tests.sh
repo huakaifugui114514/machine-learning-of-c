@@ -38,42 +38,36 @@ else
     exit 1
 fi
 
+# 运行示例
+echo -e "${YELLOW}运行示例...${NC}"
+
+
+
 # 运行测试
 echo -e "${YELLOW}运行测试...${NC}"
-echo -e "${YELLOW}运行adam测试...${NC}"./test_adam
+echo -e "${YELLOW}运行adam测试...${NC}"
 ./test_adam
-
-echo -e "${YELLOW}运行conv_transpose测试...${NC}"./test_conv_transpose
+echo -e "${YELLOW}运行conv_transpose测试...${NC}"
 ./test_conv_transpose
-
-echo -e "${YELLOW}运行conv测试...${NC}"./test_conv
+echo -e "${YELLOW}运行conv测试...${NC}"
 ./test_conv
-
-echo -e "${YELLOW}运行cross_entropy_loss测试...${NC}"./test_cross_entropy_loss
+echo -e "${YELLOW}运行cross_entropy_loss测试...${NC}"
 ./test_cross_entropy_loss
-
-echo -e "${YELLOW}运行data_loader测试...${NC}"./test_data_loader     
-./test_data_loader
-
-echo -e "${YELLOW}运行dropout2d测试...${NC}"./test_dropout2d
+echo -e "${YELLOW}运行data_loader测试...${NC}"
+./test_data_loader     
+echo -e "${YELLOW}运行dropout2d测试...${NC}"
 ./test_dropout2d
-
-echo -e "${YELLOW}运行flatten测试...${NC}"./test_flatten
+echo -e "${YELLOW}运行flatten测试...${NC}"
 ./test_flatten
-
-echo -e "${YELLOW}运行linear测试...${NC}"./test_linear
+echo -e "${YELLOW}运行linear测试...${NC}"
 ./test_linear
-
-echo -e "${YELLOW}运行mseloss测试...${NC}"./test_mseloss
+echo -e "${YELLOW}运行mseloss测试...${NC}"
 ./test_mseloss
-
-echo -e "${YELLOW}运行nll_loss测试...${NC}"./test_nll_loss  
-./test_nll_loss
-
-echo -e "${YELLOW}运行sgd测试...${NC}"./test_sgd    
+echo -e "${YELLOW}运行nll_loss测试...${NC}"
+./test_nll_loss  
+echo -e "${YELLOW}运行sgd测试...${NC}"
 ./test_sgd
-
-echo -e "${YELLOW}运行tensor测试...${NC}"./test_tensor
+echo -e "${YELLOW}运行tensor测试...${NC}"
 ./test_tensor
 
 

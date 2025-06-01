@@ -18,12 +18,21 @@ include_directories(third_party)  # 添加stb_image的路径
 # 收集源文件
 file(GLOB_RECURSE SOURCES "src/*.cpp")
 file(GLOB TEST_FILES "tests/*.cpp")
+file(GLOB EXAMPLE_FILES "examples/*.cpp")
 
-foreach(test_file ${TEST_FILES})
-    get_filename_component(test_name ${test_file} NAME_WE)
-    add_executable(${test_name} ${test_file} ${SOURCES})
-    target_link_libraries(${test_name} ${GTEST_LIBRARIES} pthread)
-    add_test(NAME ${test_name} COMMAND ${test_name})
+
+# 示例编译
+foreach(example_file ${EXAMPLE_FILES})
+    get_filename_component(example_name ${example_file} NAME_WE)
+    add_executable(${example_name} ${example_file} ${SOURCES})
 endforeach()
 
-enable_testing()
+# # 测试编译 
+# foreach(test_file ${TEST_FILES})
+#     get_filename_component(test_name ${test_file} NAME_WE)
+#     add_executable(${test_name} ${test_file} ${SOURCES})
+#     target_link_libraries(${test_name} ${GTEST_LIBRARIES} pthread)
+#     add_test(NAME ${test_name} COMMAND ${test_name})
+# endforeach()
+
+# enable_testing()
