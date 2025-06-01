@@ -35,11 +35,8 @@ Tensor::Tensor(std::vector<float>&& data, const std::vector<int>& shape, bool re
     }
 }
 
-
-
-
 TensorPtr Tensor::operator+(const TensorPtr& other) const {
-    return ops::add(const_cast<Tensor*>(this)->shared_from_this(), other);// const 转换为 non-const， 以符合函数签名要求
+    return ops::add(const_cast<Tensor*>(this)->shared_from_this(), other);
 }
 
 TensorPtr Tensor::operator*(const TensorPtr& other) const {
@@ -149,4 +146,4 @@ TensorPtr randn(const std::vector<int>& shape, bool requires_grad) {
     return std::make_shared<Tensor>(data, shape, requires_grad);
 }
 
-} // namespace dlt    
+} // namespace dlt

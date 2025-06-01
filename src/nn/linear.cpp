@@ -2,6 +2,7 @@
 #include "ops.hpp"
 #include <cmath>
 #include <random>
+#include <stdexcept>
 
 namespace dlt {
 namespace nn {
@@ -21,7 +22,7 @@ Linear::Linear(int in_features, int out_features, bool bias)
         weight_data[i] = dis(gen);
     }
     
-    weight_ = tensor(weight_data, {in_features, out_features}, true);
+    weight_ = tensor(weight_data, {out_features_, in_features_}, true);
     
     // 初始化偏置（如果需要）
     if (bias) {
@@ -31,6 +32,11 @@ Linear::Linear(int in_features, int out_features, bool bias)
 }
 
 TensorPtr Linear::forward(const TensorPtr& x) {
+    // 检查输入特征维度
+    if (x->shape()[1] != in_features_) {
+        throw std::invalid_argument("Input features do not match the layer's in_features.");
+    }
+
     // 执行矩阵乘法
     auto output = x->matmul(weight_);
     
@@ -38,9 +44,9 @@ TensorPtr Linear::forward(const TensorPtr& x) {
     if (has_bias_) {
         // 扩展偏置以匹配输出维度
         int batch_size = x->shape()[0];
-        std::vector<float> expanded_bias_data;
+        std::vector<float> expanded_bias_data(batch_size * out_features_);
         for (int i = 0; i < batch_size; ++i) {
-            expanded_bias_data.insert(expanded_bias_data.end(), bias_->data().begin(), bias_->data().end());
+            std::copy(bias_->data().begin(), bias_->data().end(), expanded_bias_data.begin() + i * out_features_);
         }
         
         auto expanded_bias = tensor(expanded_bias_data, {batch_size, out_features_}, false);
@@ -60,4 +66,4 @@ std::vector<TensorPtr> Linear::parameters() const {
 }
 
 } // namespace nn
-} // namespace dlt    
+} // namespace dlt
