@@ -2,14 +2,34 @@
 #include "data/data_loader.hpp"
 #include "tensor.hpp"
 #include <vector>
+#include <algorithm>
+#include <filesystem>
 
 using namespace dlt;
 using namespace dlt::data;
+namespace fs = std::filesystem;
 
 // 测试 DataLoader 的基本功能
 TEST(DataLoaderTest, BasicFunctionality) {
     std::string data_dir = "../resources"; 
-    int batch_size = 32;
+    // 从数据目录动态获取样本数量
+    size_t total_samples = 0;
+    for (const auto& category : fs::directory_iterator(data_dir)) {
+        if (category.is_directory()) {
+            for (const auto& entry : fs::directory_iterator(category.path())) {
+                if (entry.is_regular_file()) {
+                    std::string ext = entry.path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
+                        total_samples++;
+                    }
+                }
+            }
+        }
+    }
+
+    // 设置批次大小为样本数的最小值（避免越界）
+    int batch_size = std::min(32, static_cast<int>(total_samples));
     bool shuffle = true;
 
     // 创建 DataLoader 实例
