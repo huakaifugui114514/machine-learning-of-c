@@ -1,3 +1,4 @@
+#include <iostream>
 #include "ops.hpp"
 #include "autograd.hpp"
 #include <stdexcept>
@@ -44,6 +45,8 @@ TensorPtr mul(const TensorPtr& a, const TensorPtr& b) {
 TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
     // 检查矩阵维度是否兼容
     auto result_shape = compute_matmul_result_shape(a->shape(), b->shape());
+    a->print();
+    b->print();
     if (result_shape.empty()) {
         throw std::invalid_argument("Matrix dimensions are not compatible for multiplication");
     }
@@ -117,6 +120,40 @@ TensorPtr mean(const TensorPtr& a, int dim) {
 TensorPtr reshape(const TensorPtr& a, const std::vector<int>& new_shape) {
     auto func = std::make_shared<ReshapeFunction>(new_shape);
     return func->apply({a});
+}
+
+std::vector<TensorPtr> split(const TensorPtr& a, int dim, int sections) {
+    auto func = std::make_shared<SplitFunction>(dim, sections);
+    std::vector<TensorPtr> inputs = {a};
+    func->apply(inputs);
+    std::vector<TensorPtr> result;
+    const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
+    int split_size = input_shape[dim] / sections;
+    std::vector<int> split_shape = input_shape;
+    split_shape[dim] = split_size;
+
+    const auto& input_data = input->data();
+    int total_size = input->size();
+    int slice_size = total_size / sections;
+
+    for (int i = 0; i < sections; ++i) {
+        std::vector<float> split_data(slice_size);
+        for (int j = 0; j < slice_size; ++j) {
+            split_data[j] = input_data[i * slice_size + j];
+        }
+        TensorPtr split_tensor = std::make_shared<Tensor>(split_data, split_shape, input->requires_grad());
+        result.push_back(split_tensor);
+
+        if (input->requires_grad()) {
+            split_tensor->set_grad_fn(func);
+            for (const auto& child : inputs) {
+                split_tensor->add_child(child);
+            }
+            split_tensor->set_is_leaf(false);
+        }
+    }
+    return result;
 }
 
 TensorPtr transpose(const TensorPtr& a, int dim0, int dim1) {

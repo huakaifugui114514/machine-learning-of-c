@@ -986,43 +986,68 @@ TensorPtr SplitFunction::apply(const std::vector<TensorPtr>& inputs) {
         throw std::invalid_argument("SplitFunction requires exactly one input");
     }
     inputs_ = inputs;
-    const auto& a = inputs[0];
-    if (a->shape()[dim_] % sections_ != 0) {
-        throw std::invalid_argument("The dimension to split must be divisible by the number of sections");
+
+    const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
+
+    if (dim_ < 0 || dim_ >= static_cast<int>(input_shape.size())) {
+        throw std::invalid_argument("Invalid dimension for splitting");
     }
-    std::vector<int> section_shape = a->shape();
-    section_shape[dim_] = a->shape()[dim_] / sections_;
-    int section_size = 1;
-    for (int dim_size : section_shape) {
-        section_size *= dim_size;
+    if (input_shape[dim_] % sections_ != 0) {
+        throw std::invalid_argument("The size of the specified dimension must be divisible by sections");
     }
-    std::vector<float> result_data;
+
+    int split_size = input_shape[dim_] / sections_;
+    std::vector<int> split_shape = input_shape;
+    split_shape[dim_] = split_size;
+
+    std::vector<TensorPtr> split_tensors;
+    const auto& input_data = input->data();
+    int total_size = input->size();
+    int slice_size = total_size / sections_;
+
     for (int i = 0; i < sections_; ++i) {
-        int start_index = i * section_size;
-        result_data.insert(result_data.end(), a->data().begin() + start_index, a->data().begin() + start_index + section_size);
+        std::vector<float> split_data(slice_size);
+        for (int j = 0; j < slice_size; ++j) {
+            split_data[j] = input_data[i * slice_size + j];
+        }
+        TensorPtr split_tensor = std::make_shared<Tensor>(split_data, split_shape, input->requires_grad());
+        split_tensors.push_back(split_tensor);
+
+        if (input->requires_grad()) {
+            split_tensor->grad_fn_ = shared_from_this();
+            split_tensor->children_ = inputs;
+            split_tensor->is_leaf_ = false;
+        }
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, section_shape, requires_grad);
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
+
+    output_ = split_tensors[0];
     return output_;
 }
 
 std::vector<TensorPtr> SplitFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
+        const auto& input = inputs_[0];
+        const auto& input_shape = input->shape();
+        int split_size = input_shape[dim_] / sections_;
+        std::vector<int> split_shape = input_shape;
+        split_shape[dim_] = split_size;
+
+        std::vector<float> grad_data(input->size());
         const auto& grad_output_data = grad_output->data();
-        int section_size = grad_output->size();
+        int slice_size = grad_output->size();
+
         for (int i = 0; i < sections_; ++i) {
-            int start_index = i * section_size;
-            std::copy(grad_output_data.begin(), grad_output_data.end(), grad_data.begin() + start_index);
+            for (int j = 0; j < slice_size; ++j) {
+                grad_data[i * slice_size + j] = grad_output_data[j];
+            }
         }
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
+
     return grads;
 }
 

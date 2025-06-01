@@ -35,7 +35,9 @@ TEST(LinearTest, ForwardPass) {
     std::vector<int> input_shape = {1, in_features};
     TensorPtr x = tensor(input_data, input_shape);
 
+    std::cout << "before forward: " << std::endl;
     TensorPtr output = linear_layer.forward(x);
+    std::cout << "after forward: " << std::endl;
 
     EXPECT_EQ(output->shape()[0], 1);
     EXPECT_EQ(output->shape()[1], out_features);

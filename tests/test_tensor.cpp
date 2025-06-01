@@ -4,6 +4,7 @@
 #include <cmath>
 
 using namespace dlt;
+using namespace dlt::ops;
 
 TEST(TensorTest, CreateTensor) {
     auto t = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
@@ -15,7 +16,7 @@ TEST(TensorTest, CreateTensor) {
 TEST(TensorTest, TensorAddition) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
     auto b = tensor({5.0f, 6.0f, 7.0f, 8.0f}, {2, 2});
-    auto c = (*a) + b;
+    auto c = a + b;
     
     EXPECT_EQ(c->shape()[0], 2);
     EXPECT_EQ(c->shape()[1], 2);
@@ -30,7 +31,7 @@ TEST(TensorTest, TensorAddition) {
 TEST(TensorTest, TensorMultiplication) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
     auto b = tensor({5.0f, 6.0f, 7.0f, 8.0f}, {2, 2});
-    auto c = (*a) * b;
+    auto c = a * b;
     
     EXPECT_EQ(c->shape()[0], 2);
     EXPECT_EQ(c->shape()[1], 2);
@@ -45,7 +46,7 @@ TEST(TensorTest, TensorMultiplication) {
 TEST(TensorTest, MatrixMultiplication) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
     auto b = tensor({5.0f, 6.0f, 7.0f, 8.0f}, {2, 2});
-    auto c = a->matmul(b);
+    auto c = matmul(a, b);
     
     EXPECT_EQ(c->shape()[0], 2);
     EXPECT_EQ(c->shape()[1], 2);
@@ -59,7 +60,7 @@ TEST(TensorTest, MatrixMultiplication) {
 
 TEST(TensorTest, ReLU) {
     auto a = tensor({-1.0f, 2.0f, -3.0f, 4.0f}, {2, 2});
-    auto b = a->relu();
+    auto b = relu(a);
     
     EXPECT_EQ(b->shape()[0], 2);
     EXPECT_EQ(b->shape()[1], 2);
@@ -73,7 +74,7 @@ TEST(TensorTest, ReLU) {
 
 TEST(TensorTest, Sum) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = a->sum();
+    auto b = sum(a);
     
     EXPECT_EQ(b->shape()[0], 1);
     EXPECT_EQ(b->size(), 1);
@@ -84,7 +85,7 @@ TEST(TensorTest, Sum) {
 
 TEST(TensorTest, Exp) {
     auto a = tensor({0.0f, 1.0f}, {2});
-    auto b = ops::exp(a);
+    auto b = exp(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], std::exp(0.0f));
@@ -93,7 +94,7 @@ TEST(TensorTest, Exp) {
 
 TEST(TensorTest, Log) {
     auto a = tensor({1.0f, std::exp(1.0f)}, {2});
-    auto b = ops::log(a);
+    auto b = log(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], std::log(1.0f));
@@ -102,7 +103,7 @@ TEST(TensorTest, Log) {
 
 TEST(TensorTest, Sin) {
     auto a = tensor({0.0f, M_PI / 2}, {2});
-    auto b = ops::sin(a);
+    auto b = sin(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], std::sin(0.0f));
@@ -111,7 +112,7 @@ TEST(TensorTest, Sin) {
 
 TEST(TensorTest, Cos) {
     auto a = tensor({0.0f, M_PI}, {2});
-    auto b = ops::cos(a);
+    auto b = cos(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], std::cos(0.0f));
@@ -120,7 +121,7 @@ TEST(TensorTest, Cos) {
 
 TEST(TensorTest, Tan) {
     auto a = tensor({0.0f, M_PI / 4}, {2});
-    auto b = ops::tan(a);
+    auto b = tan(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], std::tan(0.0f));
@@ -129,21 +130,21 @@ TEST(TensorTest, Tan) {
 
 TEST(TensorTest, GlobalMax_) {
     auto a = tensor({1.0f, 2.0f, 3.0f}, {3});
-    auto b = ops::max(a);
+    auto b = max(a);
     EXPECT_EQ(b->shape()[0], 1);
     EXPECT_FLOAT_EQ(b->data()[0], 3.0f);
 }
 
 TEST(TensorTest, GlobalMin_) {
     auto a = tensor({1.0f, 2.0f, 3.0f}, {3});
-    auto b = ops::min(a);
+    auto b = min(a);
     EXPECT_EQ(b->shape()[0], 1);
     EXPECT_FLOAT_EQ(b->data()[0], 1.0f);
 }
 
 TEST(TensorTest, MaxDim0) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = ops::max(a, 0);
+    auto b = max(a, 0);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], 3.0f);
@@ -152,7 +153,7 @@ TEST(TensorTest, MaxDim0) {
 
 TEST(TensorTest, MinDim0) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = ops::min(a, 0);
+    auto b = min(a, 0);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
@@ -161,14 +162,14 @@ TEST(TensorTest, MinDim0) {
 
 TEST(TensorTest, GlobalMean) {
     auto a = tensor({1.0f, 2.0f, 3.0f}, {3});
-    auto b = ops::mean(a);
+    auto b = mean(a);
     EXPECT_EQ(b->shape()[0], 1);
     EXPECT_FLOAT_EQ(b->data()[0], (1.0f + 2.0f + 3.0f) / 3.0f);
 }
 
 TEST(TensorTest, MeanDim0) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = ops::mean(a, 0);
+    auto b = mean(a, 0);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], (1.0f + 3.0f) / 2.0f);
@@ -177,7 +178,7 @@ TEST(TensorTest, MeanDim0) {
 
 TEST(TensorTest, Reshape) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = ops::reshape(a, {4});
+    auto b = reshape(a, {4});
     EXPECT_EQ(b->shape()[0], 4);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
@@ -188,7 +189,7 @@ TEST(TensorTest, Reshape) {
 
 TEST(TensorTest, Transpose) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2});
-    auto b = ops::transpose(a, 0, 1);
+    auto b = transpose(a, 0, 1);
     EXPECT_EQ(b->shape()[0], 2);
     EXPECT_EQ(b->shape()[1], 2);
     const auto& data = b->data();
@@ -201,7 +202,7 @@ TEST(TensorTest, Transpose) {
 TEST(TensorTest, Concat) {
     auto a = tensor({1.0f, 2.0f}, {2});
     auto b = tensor({3.0f, 4.0f}, {2});
-    auto c = ops::concat({a, b}, 0);
+    auto c = concat({a, b}, 0);
     EXPECT_EQ(c->shape()[0], 4);
     const auto& data = c->data();
     EXPECT_FLOAT_EQ(data[0], 1.0f);
@@ -212,7 +213,7 @@ TEST(TensorTest, Concat) {
 
 TEST(TensorTest, Split) {
     auto a = tensor({1.0f, 2.0f, 3.0f, 4.0f}, {4});
-    auto tensors = ops::split(a, 0, 2);
+    auto tensors = split(a, 0, 2);
     EXPECT_EQ(tensors.size(), 2);
     const auto& data1 = tensors[0]->data();
     const auto& data2 = tensors[1]->data();
@@ -225,14 +226,14 @@ TEST(TensorTest, Split) {
 TEST(TensorTest, Dot) {
     auto a = tensor({1.0f, 2.0f}, {2});
     auto b = tensor({3.0f, 4.0f}, {2});
-    auto c = ops::dot(a, b);
+    auto c = dot(a, b);
     EXPECT_EQ(c->shape()[0], 1);
     EXPECT_FLOAT_EQ(c->data()[0], 1.0f * 3.0f + 2.0f * 4.0f);
 }
 
 TEST(TensorTest, Abs) {
     auto a = tensor({-1.0f, 2.0f}, {2});
-    auto b = ops::abs(a);
+    auto b = abs(a);
     EXPECT_EQ(b->shape()[0], 2);
     const auto& data = b->data();
     EXPECT_FLOAT_EQ(data[0], 1.0f);

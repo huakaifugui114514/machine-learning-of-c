@@ -29,6 +29,9 @@ public:
     int size() const { return size_; }
     bool requires_grad() const { return requires_grad_; }
     void set_requires_grad(bool requires_grad) { requires_grad_ = requires_grad; }
+    FunctionPtr grad_fn() const { return grad_fn_; }
+    std::vector<TensorPtr> children() const { return children_; }
+    bool is_leaf() const { return is_leaf_; }
     
     // 自动微分相关
     void backward(const TensorPtr& grad_output = nullptr);
@@ -36,12 +39,16 @@ public:
     
     // 辅助函数
     void print() const;
-    
-protected:
-    // 设置梯度函数和子节点（供Function类使用）
+
     void set_grad_fn(const FunctionPtr& grad_fn) { grad_fn_ = grad_fn; }
     void add_child(const TensorPtr& child) { children_.push_back(child); }
     void set_is_leaf(bool is_leaf) { is_leaf_ = is_leaf; }
+    
+protected:
+    // 设置梯度函数和子节点（供Function类使用）
+    // void set_grad_fn(const FunctionPtr& grad_fn) { grad_fn_ = grad_fn; }
+    // void add_child(const TensorPtr& child) { children_.push_back(child); }
+    // void set_is_leaf(bool is_leaf) { is_leaf_ = is_leaf; }
 
 private:
     std::vector<float> data_;       // 张量数据
@@ -56,6 +63,7 @@ private:
     bool is_leaf_;
     
     // 声明所有Function类为友元
+    friend class Function;
     friend class AddFunction;
     friend class SubFunction;
     friend class MulFunction;

@@ -1,3 +1,4 @@
+#include <iostream>
 #include "nn/linear.hpp"
 #include "ops.hpp"
 #include <cmath>
@@ -24,7 +25,7 @@ Linear::Linear(int in_features, int out_features, bool bias)
         weight_data[i] = dis(gen);
     }
     
-    weight_ = tensor(weight_data, {out_features_, in_features_}, true);
+    weight_ = tensor(weight_data, {in_features_, out_features_}, true);
     
     // 初始化偏置（如果需要）
     if (bias) {
@@ -38,9 +39,11 @@ TensorPtr Linear::forward(const TensorPtr& x) {
     if (x->shape()[1] != in_features_) {
         throw std::invalid_argument("Input features do not match the layer's in_features.");
     }
-
+     
     // 执行矩阵乘法
+    std::cout << "before matmul: " << std::endl;
     auto output = matmul(x, weight_);
+    std::cout << "after matmul" << std::endl;
     
     // 如果有偏置，加上偏置
     if (has_bias_) {
