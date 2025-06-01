@@ -30,17 +30,6 @@ public:
     bool requires_grad() const { return requires_grad_; }
     void set_requires_grad(bool requires_grad) { requires_grad_ = requires_grad; }
     
-    // 操作符重载
-    TensorPtr operator-(const TensorPtr& other) ;
-    TensorPtr operator+(const TensorPtr& other) const;
-    TensorPtr operator-(const TensorPtr& other) const;
-    TensorPtr operator*(const TensorPtr& other) const;
-    
-    // 常用操作
-    TensorPtr matmul(const TensorPtr& other) const;
-    TensorPtr relu() const;
-    TensorPtr sum() const;
-    
     // 自动微分相关
     void backward(const TensorPtr& grad_output = nullptr);
     void zero_grad();
@@ -66,13 +55,31 @@ private:
     // 用于标记该张量是否是叶子节点（用户创建的张量）
     bool is_leaf_;
     
-    // 友元类可以访问私有成员
-    friend class Function;
+    // 声明所有Function类为友元
     friend class AddFunction;
+    friend class SubFunction;
     friend class MulFunction;
+    friend class DivideFunction;
     friend class MatMulFunction;
-    friend class ReLUFunction;
     friend class SumFunction;
+    friend class ExpFunction;
+    friend class LogFunction;
+    friend class SinFunction;
+    friend class CosFunction;
+    friend class TanFunction;
+    friend class MaxFunction;
+    friend class MinFunction;
+    friend class MaxDimFunction;
+    friend class MinDimFunction;
+    friend class MeanFunction;
+    friend class MeanDimFunction;
+    friend class ReshapeFunction;
+    friend class TransposeFunction;
+    friend class ConcatFunction;
+    friend class SplitFunction;
+    friend class DotFunction;
+    friend class AbsFunction;
+    friend class ReLUFunction;  
 };
 
 // 工厂函数，用于创建张量

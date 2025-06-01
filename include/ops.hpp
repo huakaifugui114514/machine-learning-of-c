@@ -7,8 +7,21 @@ namespace dlt {
 namespace ops {
 
 // 数学运算
+
 TensorPtr add(const TensorPtr& a, const TensorPtr& b);
+TensorPtr sub(const TensorPtr& a, const TensorPtr& b);
 TensorPtr mul(const TensorPtr& a, const TensorPtr& b);
+// 操作符重载
+inline TensorPtr operator+(const TensorPtr& a, const TensorPtr& b) {
+     return add(a, b);
+}
+inline TensorPtr operator-(const TensorPtr& a, const TensorPtr& b) {
+     return sub(a, b);
+}
+inline TensorPtr operator*(const TensorPtr& a, const TensorPtr& b) {
+     return mul(a, b);
+}
+
 TensorPtr matmul(const TensorPtr& a, const TensorPtr& b);
 TensorPtr sum(const TensorPtr& a);
 TensorPtr exp(const TensorPtr& a);

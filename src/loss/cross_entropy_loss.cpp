@@ -3,8 +3,9 @@
 #include <stdexcept>
 #include <cmath>
 
-namespace dlt {
-namespace loss {
+using namespace dlt;
+using namespace dlt::ops;
+using namespace dlt::loss;
 
 TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& target) {
     // 形状检查
@@ -26,10 +27,10 @@ TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& tar
     }
 
     auto log_input = tensor(log_input_data, input_->shape());
-    auto neg_log_input = ops::mul(target, log_input);  // target * log(input)
+    auto neg_log_input = mul(target, log_input);  // target * log(input)
     auto loss = ops::mul(neg_log_input, tensor(std::vector<float>(target->size(), -1.0f), neg_log_input->shape())); // -target * log(input)
 
-    return loss->sum();
+    return sum(loss);
 }
 
 std::vector<TensorPtr> CrossEntropyLoss::backward() {
@@ -47,11 +48,9 @@ std::vector<TensorPtr> CrossEntropyLoss::backward() {
     }
     TensorPtr inv_input = tensor(inv_input_data, input_->shape());
 
-    auto grad_input = ops::mul(target_, inv_input);
-    auto grad_input_scaled = ops::mul(grad_input, tensor(std::vector<float>(target_->size(), -1.0f), grad_input->shape()));
+    auto grad_input = mul(target_, inv_input);
+    auto grad_input_scaled = mul(grad_input, tensor(std::vector<float>(target_->size(), -1.0f), grad_input->shape()));
 
     return {grad_input_scaled};
 }
 
-} // namespace loss
-} // namespace dlt

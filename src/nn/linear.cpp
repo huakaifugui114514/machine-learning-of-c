@@ -4,8 +4,10 @@
 #include <random>
 #include <stdexcept>
 
-namespace dlt {
-namespace nn {
+using namespace dlt;
+using namespace dlt::ops;
+using namespace dlt::nn;
+
 
 Linear::Linear(int in_features, int out_features, bool bias)
     : in_features_(in_features), out_features_(out_features), has_bias_(bias) {
@@ -38,7 +40,7 @@ TensorPtr Linear::forward(const TensorPtr& x) {
     }
 
     // 执行矩阵乘法
-    auto output = x->matmul(weight_);
+    auto output = matmul(x, weight_);
     
     // 如果有偏置，加上偏置
     if (has_bias_) {
@@ -51,7 +53,7 @@ TensorPtr Linear::forward(const TensorPtr& x) {
         
         auto expanded_bias = tensor(expanded_bias_data, {batch_size, out_features_}, false);
         
-        output = (*output) + expanded_bias;
+        output = output + expanded_bias;
     }
     
     return output;
@@ -64,6 +66,3 @@ std::vector<TensorPtr> Linear::parameters() const {
         return {weight_};
     }
 }
-
-} // namespace nn
-} // namespace dlt

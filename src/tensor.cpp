@@ -35,26 +35,6 @@ Tensor::Tensor(std::vector<float>&& data, const std::vector<int>& shape, bool re
     }
 }
 
-TensorPtr Tensor::operator+(const TensorPtr& other) const {
-    return ops::add(const_cast<Tensor*>(this)->shared_from_this(), other);
-}
-
-TensorPtr Tensor::operator*(const TensorPtr& other) const {
-    return ops::mul(const_cast<Tensor*>(this)->shared_from_this(), other);
-}
-
-TensorPtr Tensor::matmul(const TensorPtr& other) const {
-    return ops::matmul(const_cast<Tensor*>(this)->shared_from_this(), other);
-}
-
-TensorPtr Tensor::relu() const {
-    return ops::relu(const_cast<Tensor*>(this)->shared_from_this());
-}
-
-TensorPtr Tensor::sum() const {
-    return ops::sum(const_cast<Tensor*>(this)->shared_from_this());
-}
-
 void Tensor::backward(const TensorPtr& grad_output) {
     // 如果没有提供梯度输出，假设是标量损失
     if (grad_output == nullptr) {

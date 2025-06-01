@@ -2,10 +2,12 @@
 #include "loss/mse_loss.hpp"
 #include "optimizer/sgd.hpp"
 #include "tensor.hpp"
+#include "ops.hpp"
 #include <iostream>
 #include <vector>
 
 using namespace dlt;
+using namespace dlt::ops;
 using namespace dlt::nn;
 using namespace dlt::loss;
 using namespace dlt::optimizer;
@@ -22,7 +24,7 @@ int main() {
     MSELoss mse_loss;
 
     // 创建 SGD 优化器，学习率设置为 0.01，不使用动量
-    SGD optimizer(0.01f);
+    SGD optimizer(0.05f);
     optimizer.add_parameters(linear_layer.parameters());
 
     // 生成一些简单的训练数据
@@ -50,7 +52,7 @@ int main() {
         // 计算总损失
         TensorPtr total_loss = losses[0];
         for (size_t i = 1; i < losses.size(); ++i) {
-            total_loss = *total_loss + losses[i];
+            total_loss = total_loss + losses[i];
         }
 
         // 反向传播

@@ -2,8 +2,9 @@
 #include "ops.hpp"
 #include <stdexcept>
 
-namespace dlt {
-namespace loss {
+using namespace dlt;
+using namespace dlt::ops;
+using namespace dlt::loss;
 
 TensorPtr MSELoss::forward(const TensorPtr& input, const TensorPtr& target) {
     // 检查输入和目标张量是否为有效的指针
@@ -20,18 +21,18 @@ TensorPtr MSELoss::forward(const TensorPtr& input, const TensorPtr& target) {
     target_ = target;
 
     // 计算 input - target
-    auto neg_target = ops::mul(target, tensor(std::vector<float>(target->size(), -1.0f), target->shape()));
-    diff_ = ops::add(input, neg_target);
+    auto neg_target = mul(target, tensor(std::vector<float>(target->size(), -1.0f), target->shape()));
+    diff_ = add(input, neg_target);
 
     // 计算平方误差
-    auto squared = ops::mul(diff_, diff_);
+    auto squared = mul(diff_, diff_);
 
     // 计算误差总和
-    auto loss = squared->sum();
+    auto loss = sum(squared);
 
     // 计算平均误差
     float n = static_cast<float>(input->size());
-    auto loss_final = ops::mul(loss, tensor(std::vector<float>(loss->size(), 1.0f / n), loss->shape()));
+    auto loss_final = mul(loss, tensor(std::vector<float>(loss->size(), 1.0f / n), loss->shape()));
 
     return loss_final;
 }
@@ -45,10 +46,8 @@ std::vector<TensorPtr> MSELoss::backward() {
     // 计算梯度: 2*(input - target)/n
     float n = static_cast<float>(input_->size());
     float scale = 2.0f / n;
-    auto grad_input = ops::mul(diff_, tensor(std::vector<float>(diff_->size(), scale), diff_->shape()));
+    auto grad_input = mul(diff_, tensor(std::vector<float>(diff_->size(), scale), diff_->shape()));
 
     return {grad_input};
 }
 
-} // namespace loss
-} // namespace dlt
