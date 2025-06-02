@@ -27,12 +27,12 @@ foreach(example_file ${EXAMPLE_FILES})
     add_executable(${example_name} ${example_file} ${SOURCES})
 endforeach()
 
-# # 测试编译 
-# foreach(test_file ${TEST_FILES})
-#     get_filename_component(test_name ${test_file} NAME_WE)
-#     add_executable(${test_name} ${test_file} ${SOURCES})
-#     target_link_libraries(${test_name} ${GTEST_LIBRARIES} pthread)
-#     add_test(NAME ${test_name} COMMAND ${test_name})
-# endforeach()
+# 测试编译 
+foreach(test_file ${TEST_FILES})
+    get_filename_component(test_name ${test_file} NAME_WE)
+    add_executable(${test_name} ${test_file} ${SOURCES})
+    target_link_libraries(${test_name} ${GTEST_LIBRARIES} pthread)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
 
-# enable_testing()
+enable_testing()

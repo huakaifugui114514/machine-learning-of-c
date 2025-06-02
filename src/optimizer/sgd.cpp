@@ -1,3 +1,4 @@
+#include <iostream>
 #include "optimizer/sgd.hpp"
 #include <stdexcept>
 
@@ -15,11 +16,13 @@ SGD::SGD(float lr, float momentum) : lr_(lr), momentum_(momentum) {
 
 void SGD::add_parameters(const std::vector<TensorPtr>& params) {
     for (const auto& param : params) {
+        std::cout << "sgd params:" << std::endl;
+        param->print();
         if (!param) {
             throw std::invalid_argument("Parameter tensor cannot be null.");
         }
     }
-    std::lock_guard<std::mutex> lock(mtx_);
+
     parameters_.insert(parameters_.end(), params.begin(), params.end());
     if (momentum_ > 0) {
         for (const auto& param : params) {
@@ -29,7 +32,7 @@ void SGD::add_parameters(const std::vector<TensorPtr>& params) {
 }
 
 void SGD::step() {
-    std::lock_guard<std::mutex> lock(mtx_);
+
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
         const auto& grad = param->grad();
@@ -50,7 +53,6 @@ void SGD::step() {
 }
 
 void SGD::zero_grad() {
-    std::lock_guard<std::mutex> lock(mtx_);
     for (auto& param : parameters_) {
         param->zero_grad();
     }

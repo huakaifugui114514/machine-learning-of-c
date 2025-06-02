@@ -40,15 +40,6 @@ fi
 
 # 运行 example_usage 目录下生成的可执行文件
 echo -e "${YELLOW}运行示例代码...${NC}"
-for file in ./*; do
-    if [ -x "$file" ] && [ ! -d "$file" ]; then  # 检查文件是否为可执行文件且不是目录
-        echo -e "${YELLOW}运行 $file...${NC}"
-        ./$file
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}$file 运行失败！${NC}"
-            exit 1
-        fi
-    fi
-done
+./fully_connected_example
 
 echo -e "${GREEN}==== 项目构建和示例代码运行完成 ====${NC}"

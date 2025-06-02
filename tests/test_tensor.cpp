@@ -240,6 +240,34 @@ TEST(TensorTest, Abs) {
     EXPECT_FLOAT_EQ(data[1], 2.0f);
 }
 
+// 测试 Tensor 类的 backward 方法
+TEST(TensorBackwardTest, BackwardPass) {
+    auto a = tensor({1.0f, 2.0f}, {2}, true);
+    auto b = tensor({3.0f, 4.0f}, {2}, true);
+    auto c = a * b;
+    auto d = sum(c);
+
+    // 清零梯度
+    a->zero_grad();
+    b->zero_grad();
+
+    d->backward();
+
+    std::vector<float> expected_grad_a = {3.0f, 4.0f};
+    std::vector<float> expected_grad_b = {1.0f, 2.0f};
+
+    const auto& grad_a = a->grad();
+    const auto& grad_b = b->grad();
+
+    for (size_t i = 0; i < expected_grad_a.size(); ++i) {
+        EXPECT_FLOAT_EQ(grad_a[i], expected_grad_a[i]);
+    }
+
+    for (size_t i = 0; i < expected_grad_b.size(); ++i) {
+        EXPECT_FLOAT_EQ(grad_b[i], expected_grad_b[i]);
+    }
+}
+
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

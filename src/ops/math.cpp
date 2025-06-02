@@ -45,8 +45,6 @@ TensorPtr mul(const TensorPtr& a, const TensorPtr& b) {
 TensorPtr matmul(const TensorPtr& a, const TensorPtr& b) {
     // 检查矩阵维度是否兼容
     auto result_shape = compute_matmul_result_shape(a->shape(), b->shape());
-    a->print();
-    b->print();
     if (result_shape.empty()) {
         throw std::invalid_argument("Matrix dimensions are not compatible for multiplication");
     }

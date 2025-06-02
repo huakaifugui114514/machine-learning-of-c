@@ -41,9 +41,7 @@ TensorPtr Linear::forward(const TensorPtr& x) {
     }
      
     // 执行矩阵乘法
-    std::cout << "before matmul: " << std::endl;
     auto output = matmul(x, weight_);
-    std::cout << "after matmul" << std::endl;
     
     // 如果有偏置，加上偏置
     if (has_bias_) {
@@ -64,8 +62,12 @@ TensorPtr Linear::forward(const TensorPtr& x) {
 
 std::vector<TensorPtr> Linear::parameters() const {
     if (has_bias_) {
+        std::cout << "linear params: " << std::endl;
+        weight_->print();
+        bias_->print();
         return {weight_, bias_};
     } else {
+        weight_->print();
         return {weight_};
     }
 }

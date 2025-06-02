@@ -41,14 +41,35 @@ void Tensor::backward(const TensorPtr& grad_output) {
         if (size_ != 1) {
             throw std::invalid_argument("backward should be called only on scalar tensors when grad_output is not provided");
         }
-        grad_ = {1.0f};
+        // 如果梯度为空，初始化为 1.0f，否则进行累积
+        if (grad_.empty()) {
+            grad_ = {1.0f};
+        } else {
+            grad_[0] += 1.0f;
+        }
     } else {
-        grad_ = grad_output->data();
+        const auto& grad_output_data = grad_output->data();
+        // 如果梯度为空，初始化梯度
+        if (grad_.empty()) {
+            grad_ = grad_output_data;
+        } else {
+            // 梯度累积
+            for (size_t i = 0; i < grad_.size(); ++i) {
+                grad_[i] += grad_output_data[i];
+            }
+        }
     }
-    
+
     // 执行反向传播
     if (grad_fn_) {
-        grad_fn_->backward(shared_from_this());
+        // 调用梯度函数的 backward 方法，传入当前张量的梯度
+        auto grads = grad_fn_->backward(grad_output ? grad_output : shared_from_this());
+        // 将梯度传递给子节点
+        for (size_t i = 0; i < children_.size(); ++i) {
+            if (children_[i]->requires_grad()) {
+                children_[i]->backward(grads[i]);
+            }
+        }
     }
 }
 

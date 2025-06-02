@@ -58,6 +58,13 @@ int main() {
         // 反向传播
         total_loss->backward();
 
+        // 打印参数信息
+        std::cout << "Epoch [" << epoch + 1 << "/" << num_epochs << "] linear params: " << std::endl;
+        auto params = linear_layer.parameters();
+        for (const auto& param : params) {
+            param->print();
+        }
+
         // 更新参数
         optimizer.step();
 
