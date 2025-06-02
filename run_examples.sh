@@ -42,5 +42,6 @@ fi
 echo -e "${YELLOW}运行示例代码...${NC}"
 ./fully_connected_example
 ./fully_connected_example_1
+./CNN_example
 
 echo -e "${GREEN}==== 项目构建和示例代码运行完成 ====${NC}"
