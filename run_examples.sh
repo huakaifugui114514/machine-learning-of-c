@@ -41,5 +41,6 @@ fi
 # 运行 example_usage 目录下生成的可执行文件
 echo -e "${YELLOW}运行示例代码...${NC}"
 ./fully_connected_example
+./fully_connected_example_1
 
 echo -e "${GREEN}==== 项目构建和示例代码运行完成 ====${NC}"
