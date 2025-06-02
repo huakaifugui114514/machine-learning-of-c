@@ -1143,6 +1143,37 @@ std::vector<TensorPtr> AbsFunction::backward(const TensorPtr& grad_output) {
     return grads;
 }
 
+// ContiguousFunction 实现
+TensorPtr ContiguousFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("ContiguousFunction requires exactly one input");
+    }
+    
+    inputs_ = inputs;
+    const auto& input = inputs[0];
+    
+    // 创建连续内存副本（实际实现中可能需要处理跨步访问）
+    std::vector<float> contiguous_data(input->data());
+    
+    // 创建输出张量
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(std::move(contiguous_data), input->shape(), requires_grad);
+    
+    // 设置梯度函数
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
+}
+
+std::vector<TensorPtr> ContiguousFunction::backward(const TensorPtr& grad_output) {
+    // 梯度直接传递回输入张量
+    return { grad_output };
+}
+
 
 
 } // namespace dlt    

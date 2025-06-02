@@ -174,6 +174,12 @@ TensorPtr abs(const TensorPtr& a) {
     return func->apply({a});
 }
 
+TensorPtr contiguous(const TensorPtr& a) {
+    // 创建连续化函数
+    auto func = std::make_shared<ContiguousFunction>();
+    return func->apply({a});
+}
+
 // 辅助函数实现
 std::vector<int> compute_matmul_result_shape(const std::vector<int>& shape_a, const std::vector<int>& shape_b) {
     if (shape_a.size() != 2 || shape_b.size() != 2) {

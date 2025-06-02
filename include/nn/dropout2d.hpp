@@ -14,8 +14,13 @@ public:
     std::vector<TensorPtr> parameters() const override;
     std::string name() const override { return "Dropout2d"; }
 
+    // 显式覆盖基类函数
+    void train() override { is_training_ = true; }
+    void eval() override { is_training_ = false; }
+
 private:
     float p_;
+    using Module::is_training_; // 显式声明访问基类成员
 };
 
 } // namespace nn

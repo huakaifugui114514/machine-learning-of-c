@@ -32,6 +32,9 @@ public:
     FunctionPtr grad_fn() const { return grad_fn_; }
     std::vector<TensorPtr> children() const { return children_; }
     bool is_leaf() const { return is_leaf_; }
+    int dim() const { return shape_.size(); }
+    const float* data_ptr() const { return data_.data(); }
+    float* data_ptr() { return data_.data(); } // 非const版本
     
     // 自动微分相关
     void backward(const TensorPtr& grad_output = nullptr);
@@ -88,6 +91,7 @@ private:
     friend class DotFunction;
     friend class AbsFunction;
     friend class ReLUFunction;  
+    friend class ContiguousFunction;
 };
 
 // 工厂函数，用于创建张量

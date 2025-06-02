@@ -45,6 +45,8 @@ TensorPtr abs(const TensorPtr& a);
 // 激活函数
 TensorPtr relu(const TensorPtr& a);
 
+TensorPtr contiguous(const TensorPtr& a);
+
 // 辅助函数
 std::vector<int> compute_matmul_result_shape(const std::vector<int>& shape_a, const std::vector<int>& shape_b);
 bool shapes_match(const std::vector<int>& shape_a, const std::vector<int>& shape_b);

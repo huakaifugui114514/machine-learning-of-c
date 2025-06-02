@@ -233,6 +233,14 @@ public:
     std::string name() const override { return "AbsFunction"; }
 };
 
+// 新增 ContiguousFunction 类
+class ContiguousFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ContiguousFunction"; }
+};
+
 } // namespace dlt
 
 #endif // AUTOGRAD_HPP
