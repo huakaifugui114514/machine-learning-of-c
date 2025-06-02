@@ -32,21 +32,28 @@ void SGD::add_parameters(const std::vector<TensorPtr>& params) {
 }
 
 void SGD::step() {
-
     for (size_t i = 0; i < parameters_.size(); ++i) {
         auto& param = parameters_[i];
         const auto& grad = param->grad();
         auto& data = param->data();
 
+        // 添加梯度裁剪，防止爆炸
+        std::vector<float> clipped_grad(grad.size());
+        float max_grad = 1.0f;  // 梯度裁剪阈值
+        for (size_t j = 0; j < grad.size(); ++j) {
+            clipped_grad[j] = std::max(-max_grad, std::min(grad[j], max_grad));
+        }
+
+        // 使用裁剪后的梯度
         if (momentum_ > 0) {
             auto& velocity = velocities_[i];
             for (size_t j = 0; j < data.size(); ++j) {
-                velocity[j] = momentum_ * velocity[j] + lr_ * grad[j];
+                velocity[j] = momentum_ * velocity[j] + lr_ * clipped_grad[j];
                 data[j] -= velocity[j];
             }
         } else {
             for (size_t j = 0; j < data.size(); ++j) {
-                data[j] -= lr_ * grad[j];
+                data[j] -= lr_ * clipped_grad[j];
             }
         }
     }

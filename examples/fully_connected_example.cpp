@@ -24,7 +24,7 @@ int main() {
     MSELoss mse_loss;
 
     // 创建 SGD 优化器，学习率设置为 0.01，不使用动量
-    SGD optimizer(0.05f);
+    SGD optimizer(0.01f);
     optimizer.add_parameters(linear_layer.parameters());
 
     // 生成一些简单的训练数据
@@ -35,36 +35,26 @@ int main() {
     int num_epochs = 1000;
 
     for (int epoch = 0; epoch < num_epochs; ++epoch) {
-        // 清零梯度
         optimizer.zero_grad();
-
-        // 前向传播
-        std::vector<TensorPtr> losses;
+        TensorPtr total_loss = zeros({1});
+        
         for (size_t i = 0; i < x_data.size(); ++i) {
             TensorPtr x = tensor({x_data[i]}, {1, in_features});
             TensorPtr y = tensor({y_data[i]}, {1, out_features});
-
+            
             TensorPtr output = linear_layer.forward(x);
             TensorPtr loss = mse_loss.forward(output, y);
-            losses.push_back(loss);
+            
+            // 累积损失
+            total_loss = add(total_loss, loss);
         }
-
-        // 计算总损失
-        TensorPtr total_loss = losses[0];
-        for (size_t i = 1; i < losses.size(); ++i) {
-            total_loss = total_loss + losses[i];
-        }
-
+        
+        // 平均损失
+        total_loss = mul(total_loss, tensor({1.0f / x_data.size()}, {1}));
+        
         // 反向传播
         total_loss->backward();
-
-        // 打印参数信息
-        std::cout << "Epoch [" << epoch + 1 << "/" << num_epochs << "] linear params: " << std::endl;
-        auto params = linear_layer.parameters();
-        for (const auto& param : params) {
-            param->print();
-        }
-
+        
         // 更新参数
         optimizer.step();
 

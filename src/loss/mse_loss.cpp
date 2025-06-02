@@ -17,23 +17,15 @@ TensorPtr MSELoss::forward(const TensorPtr& input, const TensorPtr& target) {
         throw std::invalid_argument("Input and target shapes must match");
     }
 
-    input_ = input;
-    target_ = target;
-
-    // 计算 input - target
-    auto neg_target = mul(target, tensor(std::vector<float>(target->size(), -1.0f), target->shape()));
-    diff_ = add(input, neg_target);
-
-    // 计算平方误差
+    // 直接计算差值和平方
+    diff_ = sub(input, target);
     auto squared = mul(diff_, diff_);
-
-    // 计算误差总和
-    auto loss = sum(squared);
-
-    // 计算平均误差
+    
+    // 计算平均值
     float n = static_cast<float>(input->size());
-    auto loss_final = mul(loss, tensor(std::vector<float>(loss->size(), 1.0f / n), loss->shape()));
-
+    auto loss = sum(squared);
+    auto loss_final = mul(loss, tensor({1.0f / n}, {1}));
+    
     return loss_final;
 }
 
@@ -43,11 +35,9 @@ std::vector<TensorPtr> MSELoss::backward() {
         throw std::runtime_error("Must call forward() before backward()");
     }
 
-    // 计算梯度: 2*(input - target)/n
-    float n = static_cast<float>(input_->size());
-    float scale = 2.0f / n;
-    auto grad_input = mul(diff_, tensor(std::vector<float>(diff_->size(), scale), diff_->shape()));
-
+    float scale = 2.0f / input_->size();
+    auto grad_input = mul(diff_, tensor({scale}, {1}));
+    
     return {grad_input};
 }
 
