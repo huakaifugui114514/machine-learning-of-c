@@ -100,7 +100,7 @@ std::pair<std::vector<TensorPtr>, std::vector<TensorPtr>> load_mnist(const std::
 
 int main() {
     // 配置参数
-    const float learning_rate = 0.01;
+    const float learning_rate = 0.001;
     const int num_epochs = 10;
 
     // 创建模型

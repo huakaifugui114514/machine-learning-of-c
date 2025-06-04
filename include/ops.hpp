@@ -41,6 +41,7 @@ TensorPtr concat(const std::vector<TensorPtr>& tensors, int dim);
 std::vector<TensorPtr> split(const TensorPtr& a, int dim, int sections);
 TensorPtr dot(const TensorPtr& a, const TensorPtr& b);
 TensorPtr abs(const TensorPtr& a);
+TensorPtr expand(const TensorPtr& a, const std::vector<int>& new_shape);
 
 // 激活函数
 TensorPtr relu(const TensorPtr& a);

@@ -43,7 +43,7 @@ TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& tar
         for (int j = 0; j < num_classes; ++j) {
             if (target_data[i * num_classes + j] > 0) {
                 total_loss -= target_data[i * num_classes + j] * 
-                             std::log(logits[j] / exp_sum + 1e-7f);
+                             std::log(logits[j] / (exp_sum + 1e-7f));
             }
         }
     }

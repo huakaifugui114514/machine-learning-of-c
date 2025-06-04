@@ -241,6 +241,17 @@ public:
     std::string name() const override { return "ContiguousFunction"; }
 };
 
+// ExpandFunction
+class ExpandFunction : public Function {
+public:
+    ExpandFunction(const std::vector<int>& new_shape);
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ExpandFunction"; }
+private:
+    std::vector<int> new_shape_;
+};
+
 // Sigmoid操作的自动微分
 class SigmoidFunction : public Function {
 public:
@@ -297,6 +308,26 @@ private:
     int padding_;
     std::vector<int> input_shape_; // 用于存储前向传播时的输入形状
     std::vector<int> argmax_indices_; // 用于存储最大值的索引
+};
+
+// 卷积操作的自动微分
+class Conv2dFunction : public Function {
+public:
+    Conv2dFunction(int in_channels, int out_channels, int kernel_size, int stride, int padding)
+        : in_channels_(in_channels), out_channels_(out_channels), 
+          kernel_size_(kernel_size), stride_(stride), padding_(padding) {}
+
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "Conv2dFunction"; }
+
+private:
+    int in_channels_;
+    int out_channels_;
+    int kernel_size_;
+    int stride_;
+    int padding_;
+    std::vector<int> input_shape_; // 用于存储前向传播时的输入形状
 };
 
 } // namespace dlt

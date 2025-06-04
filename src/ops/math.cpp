@@ -180,6 +180,11 @@ TensorPtr contiguous(const TensorPtr& a) {
     return func->apply({a});
 }
 
+TensorPtr expand(const TensorPtr& a, const std::vector<int>& new_shape) {
+    auto func = std::make_shared<ExpandFunction>(new_shape);
+    return func->apply({a});
+}
+
 // 辅助函数实现
 std::vector<int> compute_matmul_result_shape(const std::vector<int>& shape_a, const std::vector<int>& shape_b) {
     if (shape_a.size() != 2 || shape_b.size() != 2) {

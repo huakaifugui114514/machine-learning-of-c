@@ -1180,6 +1180,95 @@ std::vector<TensorPtr> ContiguousFunction::backward(const TensorPtr& grad_output
     return { grad_output };
 }
 
+// ExpandFunction实现
+ExpandFunction::ExpandFunction(const std::vector<int>& new_shape) : new_shape_(new_shape) {}
+
+TensorPtr ExpandFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("ExpandFunction requires exactly one input");
+    }
+
+    const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
+    const auto& input_data = input->data();
+
+    if (input_shape.size() > new_shape_.size()) {
+        throw std::invalid_argument("New shape must have at least as many dimensions as the input");
+    }
+
+    std::vector<int> expanded_shape = new_shape_;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        if (input_shape[i] != 1 && input_shape[i] != new_shape_[i + new_shape_.size() - input_shape.size()]) {
+            throw std::invalid_argument("Non-singleton dimensions must match");
+        }
+    }
+
+    int expanded_size = 1;
+    for (int dim : expanded_shape) {
+        expanded_size *= dim;
+    }
+
+    std::vector<float> expanded_data(expanded_size);
+
+    // 扩展数据
+    for (int idx = 0; idx < expanded_size; ++idx) {
+        std::vector<int> multi_idx(expanded_shape.size());
+        int temp_idx = idx;
+        for (int i = expanded_shape.size() - 1; i >= 0; --i) {
+            multi_idx[i] = temp_idx % expanded_shape[i];
+            temp_idx /= expanded_shape[i];
+        }
+
+        int input_idx = 0;
+        int stride = 1;
+        for (size_t i = 0; i < input_shape.size(); ++i) {
+            input_idx += multi_idx[i + expanded_shape.size() - input_shape.size()] * stride;
+            stride *= input_shape[i];
+        }
+
+        expanded_data[idx] = input_data[input_idx];
+    }
+
+    auto output = std::make_shared<Tensor>(expanded_data, expanded_shape, input->requires_grad());
+    if (output->requires_grad()) {
+        output->grad_fn_ = shared_from_this();
+        output->children_ = inputs;
+        output->is_leaf_ = false;
+    }
+    return output;
+}
+
+std::vector<TensorPtr> ExpandFunction::backward(const TensorPtr& grad_output) {
+    const auto& grad_output_shape = grad_output->shape();
+    const auto& grad_output_data = grad_output->data();
+
+    const auto& input = inputs_[0];
+    const auto& input_shape = input->shape();
+
+    std::vector<float> grad_input_data(input->size(), 0.0f);
+
+    for (int idx = 0; idx < grad_output->size(); ++idx) {
+        std::vector<int> multi_idx(grad_output_shape.size());
+        int temp_idx = idx;
+        for (int i = grad_output_shape.size() - 1; i >= 0; --i) {
+            multi_idx[i] = temp_idx % grad_output_shape[i];
+            temp_idx /= grad_output_shape[i];
+        }
+
+        int input_idx = 0;
+        int stride = 1;
+        for (size_t i = 0; i < input_shape.size(); ++i) {
+            input_idx += multi_idx[i + grad_output_shape.size() - input_shape.size()] * stride;
+            stride *= input_shape[i];
+        }
+
+        grad_input_data[input_idx] += grad_output_data[idx];
+    }
+
+    auto grad_input = std::make_shared<Tensor>(grad_input_data, input_shape, false);
+    return {grad_input};
+}
+
 // SigmoidFunction实现
 TensorPtr SigmoidFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
@@ -1642,6 +1731,214 @@ std::vector<TensorPtr> MaxPool2dFunction::backward(const TensorPtr& grad_output)
 
         grads[0] = std::make_shared<Tensor>(grad_input_data, input_shape_, grad_output->requires_grad());
     }
+    return grads;
+}
+
+// Conv2dFunction实现
+TensorPtr Conv2dFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 2) {
+        throw std::invalid_argument("Conv2dFunction requires exactly two inputs (input tensor and weight tensor)");
+    }
+
+    inputs_ = inputs;
+    input_shape_ = inputs[0]->shape();
+
+    const auto& x = inputs[0];
+    const auto& weight = inputs[1];
+
+    // 检查输入形状 (batch_size, channels, height, width)
+    if (x->shape().size() != 4) {
+        throw std::invalid_argument("Conv2d expects 4D input (batch, channels, height, width)");
+    }
+
+    const int batch_size = x->shape()[0];
+    const int in_channels = x->shape()[1];
+    const int in_height = x->shape()[2];
+    const int in_width = x->shape()[3];
+
+    if (in_channels != in_channels_) {
+        throw std::invalid_argument("Input channels (" + std::to_string(in_channels) + 
+                                   ") don't match layer channels (" + std::to_string(in_channels_) + ")");
+    }
+
+    const int out_height = (in_height + 2 * padding_ - kernel_size_) / stride_ + 1;
+    const int out_width = (in_width + 2 * padding_ - kernel_size_) / stride_ + 1;
+
+    if (out_height <= 0 || out_width <= 0) {
+        throw std::invalid_argument("Output dimensions must be positive. Calculated: " + 
+                                   std::to_string(out_height) + "x" + std::to_string(out_width));
+    }
+
+    std::vector<float> output_data(batch_size * out_channels_ * out_height * out_width, 0.0f);
+
+    // 获取输入数据和权重数据的指针
+    const std::vector<float>& x_data_vec = x->data();
+    const float* x_data = x_data_vec.data();
+
+    const std::vector<float>& weight_data_vec = weight->data();
+    const float* weight_data = weight_data_vec.data();
+
+    // 卷积计算
+    for (int b = 0; b < batch_size; ++b) {
+        for (int oc = 0; oc < out_channels_; ++oc) {
+            for (int oh = 0; oh < out_height; ++oh) {
+                for (int ow = 0; ow < out_width; ++ow) {
+                    float sum = 0.0f;
+
+                    for (int ic = 0; ic < in_channels_; ++ic) {
+                        for (int kh = 0; kh < kernel_size_; ++kh) {
+                            for (int kw = 0; kw < kernel_size_; ++kw) {
+                                const int ih = oh * stride_ + kh - padding_;
+                                const int iw = ow * stride_ + kw - padding_;
+
+                                if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
+                                    // 输入索引计算
+                                    const size_t input_idx = 
+                                        b * in_channels_ * in_height * in_width + 
+                                        ic * in_height * in_width + 
+                                        ih * in_width + iw;
+
+                                    // 权重索引计算
+                                    const size_t weight_idx = 
+                                        oc * in_channels_ * kernel_size_ * kernel_size_ + 
+                                        ic * kernel_size_ * kernel_size_ + 
+                                        kh * kernel_size_ + kw;
+
+                                    sum += x_data[input_idx] * weight_data[weight_idx];
+                                }
+                            }
+                        }
+                    }
+
+                    // 输出索引计算
+                    const size_t output_idx = 
+                        b * out_channels_ * out_height * out_width + 
+                        oc * out_height * out_width + 
+                        oh * out_width + ow;
+
+                    output_data[output_idx] = sum;
+                }
+            }
+        }
+    }
+
+    std::vector<int> output_shape = {batch_size, out_channels_, out_height, out_width};
+    output_ = std::make_shared<Tensor>(output_data, output_shape, inputs[0]->requires_grad() || inputs[1]->requires_grad());
+
+    // 如果需要梯度，设置梯度函数
+    if (output_->requires_grad()) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+
+    return output_;
+}
+
+std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(2);
+
+    const auto& x = inputs_[0];
+    const auto& weight = inputs_[1];
+
+    const int batch_size = input_shape_[0];
+    const int in_channels = input_shape_[1];
+    const int in_height = input_shape_[2];
+    const int in_width = input_shape_[3];
+
+    const int out_height = grad_output->shape()[2];
+    const int out_width = grad_output->shape()[3];
+
+    // 初始化梯度
+    std::vector<float> grad_x_data(batch_size * in_channels * in_height * in_width, 0.0f);
+    std::vector<float> grad_weight_data(out_channels_ * in_channels_ * kernel_size_ * kernel_size_, 0.0f);
+
+    const std::vector<float>& grad_output_data = grad_output->data();
+    const std::vector<float>& x_data = x->data();
+    const std::vector<float>& weight_data = weight->data();
+
+    // 计算 grad_x
+    if (x->requires_grad()) {
+        for (int b = 0; b < batch_size; ++b) {
+            for (int oc = 0; oc < out_channels_; ++oc) {
+                for (int oh = 0; oh < out_height; ++oh) {
+                    for (int ow = 0; ow < out_width; ++ow) {
+                        for (int ic = 0; ic < in_channels_; ++ic) {
+                            for (int kh = 0; kh < kernel_size_; ++kh) {
+                                for (int kw = 0; kw < kernel_size_; ++kw) {
+                                    const int ih = oh * stride_ + kh - padding_;
+                                    const int iw = ow * stride_ + kw - padding_;
+
+                                    if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
+                                        const size_t input_idx = 
+                                            b * in_channels * in_height * in_width + 
+                                            ic * in_height * in_width + 
+                                            ih * in_width + iw;
+
+                                        const size_t weight_idx = 
+                                            oc * in_channels_ * kernel_size_ * kernel_size_ + 
+                                            ic * kernel_size_ * kernel_size_ + 
+                                            kh * kernel_size_ + kw;
+
+                                        const size_t grad_output_idx = 
+                                            b * out_channels_ * out_height * out_width + 
+                                            oc * out_height * out_width + 
+                                            oh * out_width + ow;
+
+                                        grad_x_data[input_idx] += grad_output_data[grad_output_idx] * weight_data[weight_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        grads[0] = std::make_shared<Tensor>(grad_x_data, input_shape_, false);
+    }
+
+    // 计算 grad_weight
+    if (weight->requires_grad()) {
+        for (int b = 0; b < batch_size; ++b) {
+            for (int oc = 0; oc < out_channels_; ++oc) {
+                for (int oh = 0; oh < out_height; ++oh) {
+                    for (int ow = 0; ow < out_width; ++ow) {
+                        for (int ic = 0; ic < in_channels_; ++ic) {
+                            for (int kh = 0; kh < kernel_size_; ++kh) {
+                                for (int kw = 0; kw < kernel_size_; ++kw) {
+                                    const int ih = oh * stride_ + kh - padding_;
+                                    const int iw = ow * stride_ + kw - padding_;
+
+                                    if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
+                                        const size_t input_idx = 
+                                            b * in_channels * in_height * in_width + 
+                                            ic * in_height * in_width + 
+                                            ih * in_width + iw;
+
+                                        const size_t weight_idx = 
+                                            oc * in_channels_ * kernel_size_ * kernel_size_ + 
+                                            ic * kernel_size_ * kernel_size_ + 
+                                            kh * kernel_size_ + kw;
+
+                                        const size_t grad_output_idx = 
+                                            b * out_channels_ * out_height * out_width + 
+                                            oc * out_height * out_width + 
+                                            oh * out_width + ow;
+
+                                        grad_weight_data[weight_idx] += grad_output_data[grad_output_idx] * x_data[input_idx];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        grads[1] = std::make_shared<Tensor>(grad_weight_data, weight->shape(), false);
+    }
+
     return grads;
 }
 
