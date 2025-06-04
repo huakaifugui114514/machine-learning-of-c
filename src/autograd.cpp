@@ -1,5 +1,6 @@
 #include "autograd.hpp"
 #include "ops.hpp"
+#include "nn/pooling.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
@@ -1403,6 +1404,12 @@ std::vector<TensorPtr> SoftmaxFunction::backward(const TensorPtr& grad_output) {
 
 // nn操作
 // AvgPool2dFunction实现
+AvgPool2dFunction::AvgPool2dFunction(int kernel_size, int stride, int padding)
+    : kernel_size_(kernel_size), stride_(stride), padding_(padding) {
+    if (kernel_size_ <= 0 || stride_ <= 0 || padding_ < 0) {
+        throw std::invalid_argument("Invalid pooling parameters");
+    }
+}
 TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("AvgPool2dFunction expects exactly one input");
@@ -1522,6 +1529,12 @@ std::vector<TensorPtr> AvgPool2dFunction::backward(const TensorPtr& grad_output)
 }
 
 // MaxPool2dFunction
+MaxPool2dFunction::MaxPool2dFunction(int kernel_size, int stride, int padding)
+    : kernel_size_(kernel_size), stride_(stride), padding_(padding) {
+    if (kernel_size_ <= 0 || stride_ <= 0 || padding_ < 0) {
+        throw std::invalid_argument("Invalid pooling parameters");
+    }
+}
 TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MaxPool2dFunction expects exactly one input");
