@@ -7,6 +7,11 @@
 
 namespace dlt {
 
+// 辅助工具
+inline size_t tensor_index(const std::vector<int>& shape, int b, int c, int h, int w) {
+    return ((b * shape[1] + c) * shape[2] + h) * shape[3] + w;
+}
+
 // AddFunction实现
 TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
@@ -1392,6 +1397,237 @@ std::vector<TensorPtr> SoftmaxFunction::backward(const TensorPtr& grad_output) {
         }
         
         grads[0] = std::make_shared<Tensor>(grad_data, shape, false);
+    }
+    return grads;
+}
+
+// nn操作
+// AvgPool2dFunction实现
+TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("AvgPool2dFunction expects exactly one input");
+    }
+    const auto& x = inputs[0];
+    const auto& shape = x->shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("AvgPool2d expects 4D input");
+    }
+    
+    input_shape_ = shape; // 保存输入形状
+    
+    const int batch_size = shape[0];
+    const int in_channels = shape[1];
+    const int in_height = shape[2];
+    const int in_width = shape[3];
+
+    const int out_height = (in_height + 2 * padding_ - kernel_size_) / stride_ + 1;
+    const int out_width = (in_width + 2 * padding_ - kernel_size_) / stride_ + 1;
+    
+    if (out_height <= 0 || out_width <= 0) {
+        throw std::invalid_argument("Output dimensions must be positive");
+    }
+
+    std::vector<float> output_data(batch_size * in_channels * out_height * out_width);
+    const float* x_data = x->data_ptr();
+    float* output_ptr = output_data.data();
+
+    for (int b = 0; b < batch_size; ++b) {
+        for (int c = 0; c < in_channels; ++c) {
+            for (int h_out = 0; h_out < out_height; ++h_out) {
+                const int h_start = h_out * stride_ - padding_;
+                const int h_end = h_start + kernel_size_;
+                const int h_low = std::max(0, h_start);
+                const int h_high = std::min(in_height, h_end);
+
+                for (int w_out = 0; w_out < out_width; ++w_out) {
+                    const int w_start = w_out * stride_ - padding_;
+                    const int w_end = w_start + kernel_size_;
+                    const int w_low = std::max(0, w_start);
+                    const int w_high = std::min(in_width, w_end);
+
+                    float sum = 0.0f;
+                    int count = 0;
+                    
+                    // 仅在有有效区域时计算
+                    if (h_low < h_high && w_low < w_high) {
+                        for (int h_in = h_low; h_in < h_high; ++h_in) {
+                            for (int w_in = w_low; w_in < w_high; ++w_in) {
+                                const size_t index = tensor_index(shape, b, c, h_in, w_in);
+                                sum += x_data[index];
+                                count++;
+                            }
+                        }
+                    }
+                    *output_ptr++ = (count > 0) ? (sum / count) : 0.0f;
+                }
+            }
+        }
+    }
+
+    std::vector<int> output_shape = {batch_size, in_channels, out_height, out_width};
+    auto output = std::make_shared<Tensor>(output_data, output_shape, x->requires_grad());
+    
+    // 设置输入和输出张量
+    inputs_ = inputs;
+    output_ = output;
+    
+    return output;
+}
+
+std::vector<TensorPtr> AvgPool2dFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    if (inputs_[0]->requires_grad()) {
+        const auto& output_shape = grad_output->shape();
+        const int batch_size = output_shape[0];
+        const int in_channels = output_shape[1];
+        const int out_height = output_shape[2];
+        const int out_width = output_shape[3];
+
+        const int in_height = input_shape_[2];
+        const int in_width = input_shape_[3];
+
+        std::vector<float> grad_input_data(batch_size * in_channels * in_height * in_width, 0.0f);
+        const float* grad_output_data = grad_output->data_ptr();
+
+        for (int b = 0; b < batch_size; ++b) {
+            for (int c = 0; c < in_channels; ++c) {
+                for (int h_out = 0; h_out < out_height; ++h_out) {
+                    const int h_start = h_out * stride_ - padding_;
+                    const int h_end = h_start + kernel_size_;
+                    const int h_low = std::max(0, h_start);
+                    const int h_high = std::min(in_height, h_end);
+
+                    for (int w_out = 0; w_out < out_width; ++w_out) {
+                        const int w_start = w_out * stride_ - padding_;
+                        const int w_end = w_start + kernel_size_;
+                        const int w_low = std::max(0, w_start);
+                        const int w_high = std::min(in_width, w_end);
+
+                        int count = (h_high - h_low) * (w_high - w_low);
+                        float grad = grad_output_data[tensor_index(output_shape, b, c, h_out, w_out)] / count;
+
+                        for (int h_in = h_low; h_in < h_high; ++h_in) {
+                            for (int w_in = w_low; w_in < w_high; ++w_in) {
+                                grad_input_data[tensor_index(input_shape_, b, c, h_in, w_in)] += grad;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        grads[0] = std::make_shared<Tensor>(grad_input_data, input_shape_, grad_output->requires_grad());
+    }
+    return grads;
+}
+
+// MaxPool2dFunction
+TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("MaxPool2dFunction expects exactly one input");
+    }
+    const auto& x = inputs[0];
+    const auto& shape = x->shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("MaxPool2d expects 4D input");
+    }
+    
+    input_shape_ = shape; // 保存输入形状
+    argmax_indices_.clear();
+    
+    const int batch_size = shape[0];
+    const int in_channels = shape[1];
+    const int in_height = shape[2];
+    const int in_width = shape[3];
+
+    const int out_height = (in_height + 2 * padding_ - kernel_size_) / stride_ + 1;
+    const int out_width = (in_width + 2 * padding_ - kernel_size_) / stride_ + 1;
+    
+    if (out_height <= 0 || out_width <= 0) {
+        throw std::invalid_argument("Output dimensions must be positive");
+    }
+
+    std::vector<float> output_data(batch_size * in_channels * out_height * out_width);
+    const float* x_data = x->data_ptr();
+    float* output_ptr = output_data.data();
+
+    constexpr float FLT_MIN = -std::numeric_limits<float>::infinity();
+    
+    // 并行计算，提高性能
+    #pragma omp parallel for collapse(2)
+    for (int b = 0; b < batch_size; ++b) {
+        for (int c = 0; c < in_channels; ++c) {
+            for (int oh = 0; oh < out_height; ++oh) {
+                const int h_start = oh * stride_ - padding_;
+                const int h_end = std::min(h_start + kernel_size_, in_height);
+                const int h_low = std::max(0, h_start);
+
+                
+                for (int ow = 0; ow < out_width; ++ow) {
+                    const int w_start = ow * stride_ - padding_;
+                    const int w_end = std::min(w_start + kernel_size_, in_width);
+                    const int w_low = std::max(0, w_start);
+                    
+                    float max_val = FLT_MIN;
+                    int max_index = -1;
+                    for (int kh = h_low; kh < h_end; ++kh) {
+                        for (int kw = w_low; kw < w_end; ++kw) {
+                            const size_t idx = tensor_index(shape, b, c, kh, kw);
+                            if (x_data[idx] > max_val) {
+                                max_val = x_data[idx];
+                                max_index = idx;
+                            }
+                        }
+                    }
+                    
+                    const size_t out_idx = ((b * in_channels + c) * out_height + oh) * out_width + ow;
+                    output_data[out_idx] = (max_val == FLT_MIN) ? 0.0f : max_val;
+                    argmax_indices_.push_back(max_index);
+                }
+            }
+        }
+    }
+
+    std::vector<int> output_shape = {batch_size, in_channels, out_height, out_width};
+    auto output = std::make_shared<Tensor>(output_data, output_shape, x->requires_grad());
+    
+    // 设置输入和输出张量
+    inputs_ = inputs;
+    output_ = output;
+    
+    return output;
+}
+
+std::vector<TensorPtr> MaxPool2dFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    if (inputs_[0]->requires_grad()) {
+        const auto& output_shape = grad_output->shape();
+        const int batch_size = output_shape[0];
+        const int in_channels = output_shape[1];
+        const int out_height = output_shape[2];
+        const int out_width = output_shape[3];
+
+        const int in_height = input_shape_[2];
+        const int in_width = input_shape_[3];
+
+        std::vector<float> grad_input_data(batch_size * in_channels * in_height * in_width, 0.0f);
+        const float* grad_output_data = grad_output->data_ptr();
+
+        for (int b = 0; b < batch_size; ++b) {
+            for (int c = 0; c < in_channels; ++c) {
+                for (int h_out = 0; h_out < out_height; ++h_out) {
+                    for (int w_out = 0; w_out < out_width; ++w_out) {
+                        const size_t out_idx = ((b * in_channels + c) * out_height + h_out) * out_width + w_out;
+                        const int max_index = argmax_indices_[out_idx];
+                        if (max_index != -1) {
+                            grad_input_data[max_index] += grad_output_data[out_idx];
+                        }
+                    }
+                }
+            }
+        }
+
+        grads[0] = std::make_shared<Tensor>(grad_input_data, input_shape_, grad_output->requires_grad());
     }
     return grads;
 }

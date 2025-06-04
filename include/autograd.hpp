@@ -268,6 +268,37 @@ private:
     int dim_;  // 归一化的维度
 };
 
+
+// nn操作
+// 平均池化操作的自动微分
+class AvgPool2dFunction : public Function {
+public:
+    AvgPool2dFunction(int kernel_size, int stride, int padding);
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "AvgPool2dFunction"; }
+private:
+    int kernel_size_;
+    int stride_;
+    int padding_;
+    std::vector<int> input_shape_; // 用于存储前向传播时的输入形状
+};
+
+// 最大池化操作的自动微分
+class MaxPool2dFunction : public Function {
+public:
+    MaxPool2dFunction(int kernel_size, int stride, int padding);
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "MaxPool2dFunction"; }
+private:
+    int kernel_size_;
+    int stride_;
+    int padding_;
+    std::vector<int> input_shape_; // 用于存储前向传播时的输入形状
+    std::vector<int> argmax_indices_; // 用于存储最大值的索引
+};
+
 } // namespace dlt
 
 #endif // AUTOGRAD_HPP
