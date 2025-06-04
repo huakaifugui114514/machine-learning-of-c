@@ -1174,6 +1174,226 @@ std::vector<TensorPtr> ContiguousFunction::backward(const TensorPtr& grad_output
     return { grad_output };
 }
 
+// SigmoidFunction实现
+TensorPtr SigmoidFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("SigmoidFunction requires exactly one input");
+    }
+    
+    inputs_ = inputs;
+    const auto& a_data = inputs[0]->data();
+    std::vector<float> result_data(a_data.size());
+    for (size_t i = 0; i < a_data.size(); ++i) {
+        result_data[i] = 1.0f / (1.0f + std::exp(-a_data[i]));
+    }
+    
+    bool requires_grad = inputs[0]->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
+}
 
+std::vector<TensorPtr> SigmoidFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    if (inputs_[0]->requires_grad()) {
+        const auto& output_data = output_->data(); // 前向传播的输出
+        const auto& grad_output_data = grad_output->data();
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        for (size_t i = 0; i < grad_data.size(); ++i) {
+            float s = output_data[i];
+            grad_data[i] = grad_output_data[i] * s * (1 - s); // σ'(x) = σ(x)(1-σ(x))
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+    }
+    return grads;
+}
+
+// TanhFunction实现
+TensorPtr TanhFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("TanhFunction requires exactly one input");
+    }
+    
+    inputs_ = inputs;
+    const auto& a_data = inputs[0]->data();
+    std::vector<float> result_data(a_data.size());
+    for (size_t i = 0; i < a_data.size(); ++i) {
+        result_data[i] = std::tanh(a_data[i]);
+    }
+    
+    bool requires_grad = inputs[0]->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
+}
+
+std::vector<TensorPtr> TanhFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    if (inputs_[0]->requires_grad()) {
+        const auto& output_data = output_->data(); // 前向传播的输出
+        const auto& grad_output_data = grad_output->data();
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        for (size_t i = 0; i < grad_data.size(); ++i) {
+            float t = output_data[i];
+            grad_data[i] = grad_output_data[i] * (1 - t * t); // tanh'(x) = 1 - tanh²(x)
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+    }
+    return grads;
+}
+
+// SoftmaxFunction实现
+TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("SoftmaxFunction requires exactly one input");
+    }
+    
+    inputs_ = inputs;
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& shape = input->shape();
+    
+    // 确定实际维度（支持负数索引）
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(shape.size())) {
+        throw std::invalid_argument("Invalid dimension for softmax");
+    }
+    
+    // 计算沿指定维度的元素数量
+    int outer_size = 1;
+    for (int i = 0; i < actual_dim; ++i) {
+        outer_size *= shape[i];
+    }
+    
+    int inner_size = 1;
+    for (int i = actual_dim + 1; i < static_cast<int>(shape.size()); ++i) {
+        inner_size *= shape[i];
+    }
+    
+    int dim_size = shape[actual_dim];
+    int step_size = inner_size * dim_size;
+    
+    // 执行softmax计算
+    std::vector<float> result_data(input_data.size());
+    
+    for (int i = 0; i < outer_size; ++i) {
+        for (int j = 0; j < inner_size; ++j) {
+            // 找到当前切片的最大值（数值稳定性）
+            float max_val = -std::numeric_limits<float>::infinity();
+            for (int k = 0; k < dim_size; ++k) {
+                int idx = i * step_size + k * inner_size + j;
+                if (input_data[idx] > max_val) {
+                    max_val = input_data[idx];
+                }
+            }
+            
+            // 计算指数和
+            float exp_sum = 0.0f;
+            for (int k = 0; k < dim_size; ++k) {
+                int idx = i * step_size + k * inner_size + j;
+                float exp_val = std::exp(input_data[idx] - max_val);
+                result_data[idx] = exp_val;
+                exp_sum += exp_val;
+            }
+            
+            // 归一化
+            for (int k = 0; k < dim_size; ++k) {
+                int idx = i * step_size + k * inner_size + j;
+                result_data[idx] /= exp_sum;
+            }
+        }
+    }
+    
+    // 创建输出张量
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, shape, requires_grad);
+    
+    // 设置梯度函数
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
+}
+
+std::vector<TensorPtr> SoftmaxFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    if (inputs_[0]->requires_grad()) {
+        const auto& output_data = output_->data();  // softmax输出
+        const auto& grad_output_data = grad_output->data();
+        const auto& shape = inputs_[0]->shape();
+        
+        // 确定实际维度
+        int actual_dim = dim_;
+        if (actual_dim < 0) {
+            actual_dim = shape.size() + actual_dim;
+        }
+        
+        // 计算维度参数
+        int outer_size = 1;
+        for (int i = 0; i < actual_dim; ++i) {
+            outer_size *= shape[i];
+        }
+        
+        int inner_size = 1;
+        for (int i = actual_dim + 1; i < static_cast<int>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+        
+        int dim_size = shape[actual_dim];
+        int step_size = inner_size * dim_size;
+        
+        // 计算梯度
+        std::vector<float> grad_data(output_data.size(), 0.0f);
+        
+        for (int i = 0; i < outer_size; ++i) {
+            for (int j = 0; j < inner_size; ++j) {
+                // 计算雅可比矩阵的点积
+                for (int k = 0; k < dim_size; ++k) {
+                    int idx_k = i * step_size + k * inner_size + j;
+                    float sum = 0.0f;
+                    
+                    for (int l = 0; l < dim_size; ++l) {
+                        int idx_l = i * step_size + l * inner_size + j;
+                        float grad_val = grad_output_data[idx_l];
+                        
+                        // 雅可比矩阵项: ∂y_l/∂x_k
+                        float jacobian = output_data[idx_l] * 
+                                        ((k == l) ? (1.0f - output_data[idx_k]) 
+                                                  : (-output_data[idx_k]));
+                        
+                        sum += grad_val * jacobian;
+                    }
+                    
+                    grad_data[idx_k] = sum;
+                }
+            }
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, shape, false);
+    }
+    return grads;
+}
 
 } // namespace dlt    

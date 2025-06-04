@@ -1,7 +1,7 @@
 #include "nn/conv.hpp"
 #include "nn/pooling.hpp"
 #include "nn/linear.hpp"
-#include "loss/mse_loss.hpp"  
+#include "loss/cross_entropy_loss.hpp"  
 #include "optimizer/sgd.hpp"  
 #include "ops.hpp"
 #include "tensor.hpp"
@@ -107,39 +107,41 @@ int main() {
     MNISTCNN model;
 
     // 创建损失函数和优化器
-    MSELoss mse_loss;  
+    CrossEntropyLoss cross_entropy_loss;  
     SGD optimizer(learning_rate);  
 
     // 加载MNIST数据集
     auto [train_images, train_labels] = load_mnist("resources/mnist/train-images-idx3-ubyte/train-images.idx3-ubyte", "resources/mnist/train-labels-idx1-ubyte/train-labels.idx1-ubyte");
     auto [test_images, test_labels] = load_mnist("resources/mnist/t10k-images-idx3-ubyte/t10k-images.idx3-ubyte", "resources/mnist/t10k-labels-idx1-ubyte/t10k-labels.idx1-ubyte");
 
-    // 训练循环
+    const int batch_size = 64;
+    const int num_batches = train_images.size() / batch_size;
+
     for (int epoch = 0; epoch < num_epochs; ++epoch) {
-        optimizer.zero_grad();
-        TensorPtr total_loss = zeros({1});
-
-        for (size_t i = 0; i < train_images.size(); ++i) {
-            // 前向传播
-            TensorPtr output = model.forward(train_images[i]);
-            TensorPtr loss = mse_loss.forward(output, train_labels[i]);
-
-            // 累积损失
-            total_loss = add(total_loss, loss);
+        float epoch_loss = 0.0f;
+        
+        for (int batch_idx = 0; batch_idx < num_batches; ++batch_idx) {
+            optimizer.zero_grad();
+            TensorPtr batch_loss = zeros({1});
+            
+            // 处理小批量
+            for (int i = 0; i < batch_size; ++i) {
+                int idx = batch_idx * batch_size + i;
+                TensorPtr output = model.forward(train_images[idx]);
+                TensorPtr loss = cross_entropy_loss.forward(output, train_labels[idx]);
+                batch_loss = add(batch_loss, loss);
+            }
+            
+            // 平均损失
+            batch_loss = mul(batch_loss, tensor({1.0f / batch_size}, {1}));
+            batch_loss->backward();
+            optimizer.step();
+            
+            epoch_loss += batch_loss->data()[0];
         }
-
-        // 计算平均损失
-        total_loss = mul(total_loss, tensor({1.0f / static_cast<float>(train_images.size())}, {1}));
-
-        // 反向传播
-        total_loss->backward();
-
-        // 更新参数
-        optimizer.step();
-
-        // 每一轮打印损失
+        
         std::cout << "Epoch [" << epoch + 1 << "/" << num_epochs
-                  << "], Loss: " << total_loss->data()[0] << std::endl;
+                  << "], Loss: " << epoch_loss / num_batches << std::endl;
     }
 
     // 评估模型

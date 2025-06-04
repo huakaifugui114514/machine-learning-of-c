@@ -2,35 +2,53 @@
 #include "ops.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <algorithm>
 
 using namespace dlt;
 using namespace dlt::ops;
 using namespace dlt::loss;
 
 TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& target) {
-    // 形状检查
-    if (input->shape() != target->shape()) {
-        throw std::invalid_argument("Input and target shapes must match");
+    // 检查形状 (batch_size, num_classes)
+    if (input->shape().size() != 2 || target->shape().size() != 2) {
+        throw std::invalid_argument("Both input and target must be 2D tensors");
     }
-
+    
+    const int batch_size = input->shape()[0];
+    const int num_classes = input->shape()[1];
+    
     input_ = input;
     target_ = target;
-    float epsilon = 1e-7f;
-
-    // 计算 -target * log(input)
-    std::vector<float> log_input_data(input_->size());
-    for (size_t i = 0; i < input_->size(); ++i) {
-        if (input_->data()[i] == 0) {
-            throw std::invalid_argument("Division by zero is not allowed");
+    
+    const auto& input_data = input->data();
+    const auto& target_data = target->data();
+    
+    float total_loss = 0.0f;
+    
+    for (int i = 0; i < batch_size; ++i) {
+        // 找到最大值提高数值稳定性
+        float max_val = *std::max_element(input_data.begin() + i * num_classes, 
+                                         input_data.begin() + (i+1) * num_classes);
+        
+        float exp_sum = 0.0f;
+        std::vector<float> logits(num_classes);
+        
+        // 计算softmax
+        for (int j = 0; j < num_classes; ++j) {
+            logits[j] = std::exp(input_data[i * num_classes + j] - max_val);
+            exp_sum += logits[j];
         }
-        log_input_data[i] = std::log(input_->data()[i]);
+        
+        // 计算交叉熵
+        for (int j = 0; j < num_classes; ++j) {
+            if (target_data[i * num_classes + j] > 0) {
+                total_loss -= target_data[i * num_classes + j] * 
+                             std::log(logits[j] / exp_sum + 1e-7f);
+            }
+        }
     }
-
-    auto log_input = tensor(log_input_data, input_->shape());
-    auto neg_log_input = mul(target, log_input);  // target * log(input)
-    auto loss = ops::mul(neg_log_input, tensor(std::vector<float>(target->size(), -1.0f), neg_log_input->shape())); // -target * log(input)
-
-    return sum(loss);
+    
+    return tensor({total_loss / batch_size}, {1});
 }
 
 std::vector<TensorPtr> CrossEntropyLoss::backward() {
@@ -38,19 +56,27 @@ std::vector<TensorPtr> CrossEntropyLoss::backward() {
         throw std::runtime_error("Must call forward() before backward()");
     }
 
-    // 计算 input 的倒数
-    std::vector<float> inv_input_data(input_->size());
-    for (size_t i = 0; i < input_->size(); ++i) {
-        if (input_->data()[i] == 0) {
-            throw std::invalid_argument("Division by zero is not allowed");
+    const float epsilon = 1e-7f;
+    const int batch_size = input_->shape()[0];
+    const int num_classes = input_->size() / batch_size;
+    
+    std::vector<float> grad_data(input_->size());
+    const auto& input_data = input_->data();
+    const auto& target_data = target_->data();
+    
+    // 计算梯度
+    for (int i = 0; i < batch_size; ++i) {
+        for (int j = 0; j < num_classes; ++j) {
+            const int idx = i * num_classes + j;
+            float prob = std::clamp(input_data[idx], epsilon, 1.0f - epsilon);
+            grad_data[idx] = (prob - target_data[idx]) / (prob * (1 - prob));
         }
-        inv_input_data[i] = 1.0f / input_->data()[i];
     }
-    TensorPtr inv_input = tensor(inv_input_data, input_->shape());
-
-    auto grad_input = mul(target_, inv_input);
-    auto grad_input_scaled = mul(grad_input, tensor(std::vector<float>(target_->size(), -1.0f), grad_input->shape()));
-
-    return {grad_input_scaled};
+    
+    // 归一化梯度
+    for (float& val : grad_data) {
+        val /= batch_size;
+    }
+    
+    return {tensor(grad_data, input_->shape())};
 }
-

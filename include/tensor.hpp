@@ -90,8 +90,13 @@ private:
     friend class SplitFunction;
     friend class DotFunction;
     friend class AbsFunction;
+
+    // 激活函数
     friend class ReLUFunction;  
     friend class ContiguousFunction;
+    friend class SigmoidFunction;
+    friend class TanhFunction;
+    friend class SoftmaxFunction;
 };
 
 // 工厂函数，用于创建张量

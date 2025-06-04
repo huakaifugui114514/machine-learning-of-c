@@ -194,17 +194,7 @@ std::vector<int> compute_matmul_result_shape(const std::vector<int>& shape_a, co
 }
 
 bool shapes_match(const std::vector<int>& shape_a, const std::vector<int>& shape_b) {
-    if (shape_a.size() != shape_b.size()) {
-        return false;
-    }
-    
-    for (size_t i = 0; i < shape_a.size(); ++i) {
-        if (shape_a[i] != shape_b[i]) {
-            return false;
-        }
-    }
-    
-    return true;
+    return shape_a == shape_b; 
 }
 
 } // namespace ops

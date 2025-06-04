@@ -44,6 +44,9 @@ TensorPtr abs(const TensorPtr& a);
 
 // 激活函数
 TensorPtr relu(const TensorPtr& a);
+TensorPtr sigmoid(const TensorPtr& a);
+TensorPtr tanh(const TensorPtr& a);
+TensorPtr softmax(const TensorPtr& a, int dim = -1);
 
 TensorPtr contiguous(const TensorPtr& a);
 

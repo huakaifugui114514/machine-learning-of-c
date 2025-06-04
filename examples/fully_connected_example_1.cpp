@@ -46,8 +46,8 @@ int main() {
     const int input_size = 1;
     const int hidden_size = 8;
     const int output_size = 1;
-    const float learning_rate = 0.001;  // 修改2：Adam通常使用更小的学习率
-    const int num_epochs = 5000;
+    const float learning_rate = 0.001;  
+    const int num_epochs = 1000;
     const int num_samples = 100;
 
     // 创建模型
