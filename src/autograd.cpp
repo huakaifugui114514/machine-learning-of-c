@@ -1,10 +1,16 @@
 #include "autograd.hpp"
 #include "ops.hpp"
 #include "nn/pooling.hpp"
+#include <iostream>
 #include <stdexcept>
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <limits>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace dlt {
 
@@ -13,6 +19,50 @@ inline size_t tensor_index(const std::vector<int>& shape, int b, int c, int h, i
     return ((b * shape[1] + c) * shape[2] + h) * shape[3] + w;
 }
 
+// 通用索引计算优化
+inline size_t compute_index(const std::vector<int>& shape, const std::vector<int>& indices) {
+    size_t index = 0;
+    size_t stride = 1;
+    for (int i = shape.size() - 1; i >= 0; --i) {
+        index += indices[i] * stride;
+        stride *= shape[i];
+    }
+    return index;
+}
+
+// 优化后的张量索引计算
+inline size_t optimized_tensor_index(const std::vector<int>& shape, 
+                                    int b, int c, int h, int w) {
+    // 假设形状为 [B, C, H, W]
+    return (b * shape[1] * shape[2] * shape[3]) + 
+           (c * shape[2] * shape[3]) + 
+           (h * shape[3]) + 
+           w;
+}
+
+// 宏定义修复：使用_Pragma代替#pragma，并添加括号保护
+#define VECTORIZED_LOOP(operation) \
+    const auto& in_data = inputs[0]->data(); \
+    std::vector<float> result_data(in_data.size()); \
+    const size_t size = in_data.size(); \
+    _Pragma("omp parallel for simd") \
+    for (size_t i = 0; i < size; ++i) { \
+        result_data[i] = (operation); \
+    } \
+    bool requires_grad = inputs[0]->requires_grad(); \
+    auto output = std::make_shared<Tensor>( \
+        std::move(result_data), \
+        std::vector<int>(inputs[0]->shape()), \
+        requires_grad \
+    ); \
+    if (requires_grad) { \
+        output->grad_fn_ = shared_from_this(); \
+        output->children_ = inputs; \
+        output->is_leaf_ = false; \
+    } \
+    return output;
+
+
 // AddFunction实现
 TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
@@ -20,21 +70,23 @@ TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     }
     
     inputs_ = inputs;
-    
-    // 执行加法操作
     const auto& a_data = inputs[0]->data();
     const auto& b_data = inputs[1]->data();
+    const size_t size = a_data.size();
     
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
+    std::vector<float> result_data(size);
+    _Pragma("omp parallel for")
+    for (size_t i = 0; i < size; ++i) {
         result_data[i] = a_data[i] + b_data[i];
     }
     
-    // 创建输出张量
     bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        std::vector<int>(inputs[0]->shape()), 
+        requires_grad
+    );
     
-    // 如果需要梯度，设置梯度函数
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -43,7 +95,6 @@ TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     
     return output_;
 }
-
 
 std::vector<TensorPtr> AddFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
@@ -191,40 +242,37 @@ TensorPtr MatMulFunction::apply(const std::vector<TensorPtr>& inputs) {
     }
     
     inputs_ = inputs;
-    
-    // 执行矩阵乘法
     const auto& a = inputs[0];
     const auto& b = inputs[1];
     
-    const auto& a_data = a->data();
-    const auto& b_data = b->data();
+    const auto& a_shape = a->shape();
+    const auto& b_shape = b->shape();
+    const int m = a_shape[0];
+    const int k = a_shape[1];
+    const int n = b_shape[1];
     
-    // 检查矩阵维度是否兼容
-    auto result_shape = ops::compute_matmul_result_shape(a->shape(), b->shape());
-    if (result_shape.empty()) {
-        throw std::invalid_argument("Matrix dimensions are not compatible for multiplication");
-    }
+    std::vector<float> result_data(m * n, 0.0f);
+    const float* a_data = a->data_ptr();
+    const float* b_data = b->data_ptr();
     
-    int m = a->shape()[0];
-    int n = a->shape()[1];
-    int p = b->shape()[1];
-    
-    std::vector<float> result_data(m * p, 0.0f);
-    
-    // 执行矩阵乘法
+    _Pragma("omp parallel for collapse(2)")
     for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < p; ++j) {
-            for (int k = 0; k < n; ++k) {
-                result_data[i * p + j] += a_data[i * n + k] * b_data[k * p + j];
+        for (int j = 0; j < n; ++j) {
+            float sum = 0.0f;
+            for (int kk = 0; kk < k; ++kk) {
+                sum += a_data[i * k + kk] * b_data[kk * n + j];
             }
+            result_data[i * n + j] = sum;
         }
     }
     
-    // 创建输出张量
-    bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, result_shape, requires_grad);
+    bool requires_grad = a->requires_grad() || b->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        std::vector<int>{m, n}, 
+        requires_grad
+    );
     
-    // 如果需要梯度，设置梯度函数
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -275,55 +323,7 @@ std::vector<TensorPtr> MatMulFunction::backward(const TensorPtr& grad_output) {
         auto a_t = std::make_shared<Tensor>(a_t_data, std::vector<int>{n, m}, false);
         
         // 计算a_t和grad_output的矩阵乘法
-        grads[1] =ops::matmul(a_t, grad_output);
-    }
-    
-    return grads;
-}
-
-// ReLUFunction实现
-TensorPtr ReLUFunction::apply(const std::vector<TensorPtr>& inputs) {
-    if (inputs.size() != 1) {
-        throw std::invalid_argument("ReLUFunction requires exactly one input");
-    }
-    
-    inputs_ = inputs;
-    
-    // 执行ReLU操作
-    const auto& a_data = inputs[0]->data();
-    
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::max(0.0f, a_data[i]);
-    }
-    
-    // 创建输出张量
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
-    
-    // 如果需要梯度，设置梯度函数
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    
-    return output_;
-}
-
-std::vector<TensorPtr> ReLUFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(1);
-    
-    if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
-        const auto& grad_output_data = grad_output->data();
-        
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * (a_data[i] > 0 ? 1.0f : 0.0f);
-        }
-        
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+        grads[1] = ops::matmul(a_t, grad_output);
     }
     
     return grads;
@@ -1269,29 +1269,87 @@ std::vector<TensorPtr> ExpandFunction::backward(const TensorPtr& grad_output) {
     return {grad_input};
 }
 
+// ReLUFunction实现
+TensorPtr ReLUFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("ReLUFunction requires exactly one input");
+    }
+    
+    if (!inputs[0]) {
+        throw std::invalid_argument("ReLU input is null");
+    }
+    
+    inputs_ = inputs;
+    
+    const auto& in_data = inputs[0]->data();
+    std::vector<float> result_data(in_data.size());
+    const size_t size = in_data.size();
+    
+    _Pragma("omp parallel for simd")
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::max(0.0f, in_data[i]);
+    }
+    
+    bool requires_grad = inputs[0]->requires_grad();
+    auto output = std::make_shared<Tensor>(
+        std::move(result_data), 
+        std::vector<int>(inputs[0]->shape()), 
+        requires_grad
+    );
+    
+    if (requires_grad) {
+        output->grad_fn_ = shared_from_this();
+        output->children_ = inputs;
+        output->is_leaf_ = false;
+    }
+    
+    return output;
+}
+
+std::vector<TensorPtr> ReLUFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    
+    // 检查输入是否有效
+    if (inputs_.empty() || !inputs_[0]) {
+        std::cerr << "ReLU backward error: inputs_[0] is null!" << std::endl;
+        return grads;
+    }
+    
+    if (!grad_output) {
+        std::cerr << "ReLU backward error: grad_output is null!" << std::endl;
+        return grads;
+    }
+    
+    if (inputs_[0]->requires_grad()) {
+        std::vector<float> grad_data(inputs_[0]->size());
+        const auto& a_data = inputs_[0]->data();
+        const auto& grad_output_data = grad_output->data();
+        
+        // 检查大小是否匹配
+        if (grad_data.size() != grad_output_data.size()) {
+            std::cerr << "ReLU backward size mismatch: " 
+                      << grad_data.size() << " vs " << grad_output_data.size()
+                      << std::endl;
+            return grads;
+        }
+        
+        _Pragma("omp parallel for simd")
+        for (size_t i = 0; i < grad_data.size(); ++i) {
+            grad_data[i] = grad_output_data[i] * (a_data[i] > 0 ? 1.0f : 0.0f);
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+    }
+    
+    return grads;
+}
+
 // SigmoidFunction实现
 TensorPtr SigmoidFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SigmoidFunction requires exactly one input");
     }
-    
-    inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = 1.0f / (1.0f + std::exp(-a_data[i]));
-    }
-    
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
-    
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    
-    return output_;
+    VECTORIZED_LOOP(1.0f / (1.0f + std::exp(-in_data[i])));
 }
 
 std::vector<TensorPtr> SigmoidFunction::backward(const TensorPtr& grad_output) {
@@ -1301,6 +1359,7 @@ std::vector<TensorPtr> SigmoidFunction::backward(const TensorPtr& grad_output) {
         const auto& grad_output_data = grad_output->data();
         
         std::vector<float> grad_data(inputs_[0]->size());
+        _Pragma("omp parallel for simd")
         for (size_t i = 0; i < grad_data.size(); ++i) {
             float s = output_data[i];
             grad_data[i] = grad_output_data[i] * s * (1 - s); // σ'(x) = σ(x)(1-σ(x))
@@ -1364,11 +1423,7 @@ TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     const auto& input_data = input->data();
     const auto& shape = input->shape();
     
-    // 确定实际维度（支持负数索引）
-    int actual_dim = dim_;
-    if (actual_dim < 0) {
-        actual_dim = shape.size() + actual_dim;
-    }
+    int actual_dim = dim_ < 0 ? shape.size() + dim_ : dim_;
     if (actual_dim < 0 || actual_dim >= static_cast<int>(shape.size())) {
         throw std::invalid_argument("Invalid dimension for softmax");
     }
@@ -1386,43 +1441,45 @@ TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     
     int dim_size = shape[actual_dim];
     int step_size = inner_size * dim_size;
+    int total_size = input->size();
     
-    // 执行softmax计算
-    std::vector<float> result_data(input_data.size());
+    std::vector<float> result_data(total_size);
+    const float* input_ptr = input_data.data();
     
+    _Pragma("omp parallel for")
     for (int i = 0; i < outer_size; ++i) {
         for (int j = 0; j < inner_size; ++j) {
-            // 找到当前切片的最大值（数值稳定性）
+            const int base_idx = i * step_size + j;
+            
+            // 找到当前切片的最大值
             float max_val = -std::numeric_limits<float>::infinity();
             for (int k = 0; k < dim_size; ++k) {
-                int idx = i * step_size + k * inner_size + j;
-                if (input_data[idx] > max_val) {
-                    max_val = input_data[idx];
+                int idx = base_idx + k * inner_size;
+                if (input_ptr[idx] > max_val) {
+                    max_val = input_ptr[idx];
                 }
             }
             
             // 计算指数和
             float exp_sum = 0.0f;
             for (int k = 0; k < dim_size; ++k) {
-                int idx = i * step_size + k * inner_size + j;
-                float exp_val = std::exp(input_data[idx] - max_val);
+                int idx = base_idx + k * inner_size;
+                float exp_val = std::exp(input_ptr[idx] - max_val);
                 result_data[idx] = exp_val;
                 exp_sum += exp_val;
             }
             
             // 归一化
             for (int k = 0; k < dim_size; ++k) {
-                int idx = i * step_size + k * inner_size + j;
+                int idx = base_idx + k * inner_size;
                 result_data[idx] /= exp_sum;
             }
         }
     }
     
-    // 创建输出张量
     bool requires_grad = input->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, shape, requires_grad);
+    output_ = std::make_shared<Tensor>(std::move(result_data), shape, requires_grad);
     
-    // 设置梯度函数
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -1628,14 +1685,10 @@ TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MaxPool2dFunction expects exactly one input");
     }
+    
     const auto& x = inputs[0];
     const auto& shape = x->shape();
-    if (shape.size() != 4) {
-        throw std::invalid_argument("MaxPool2d expects 4D input");
-    }
-    
-    input_shape_ = shape; // 保存输入形状
-    argmax_indices_.clear();
+    input_shape_ = shape;
     
     const int batch_size = shape[0];
     const int in_channels = shape[1];
@@ -1644,60 +1697,57 @@ TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
 
     const int out_height = (in_height + 2 * padding_ - kernel_size_) / stride_ + 1;
     const int out_width = (in_width + 2 * padding_ - kernel_size_) / stride_ + 1;
-    
-    if (out_height <= 0 || out_width <= 0) {
-        throw std::invalid_argument("Output dimensions must be positive");
-    }
 
-    std::vector<float> output_data(batch_size * in_channels * out_height * out_width);
+    std::vector<float> output_data(batch_size * in_channels * out_height * out_width, 0.0f);
+    argmax_indices_.resize(output_data.size(), -1);
     const float* x_data = x->data_ptr();
-    float* output_ptr = output_data.data();
-
-    constexpr float FLT_MIN = -std::numeric_limits<float>::infinity();
     
-    // 并行计算，提高性能
-    #pragma omp parallel for collapse(2)
+    // 预计算步长
+    const int in_c_stride = in_height * in_width;
+    const int in_b_stride = in_channels * in_c_stride;
+    const int out_c_stride = out_height * out_width;
+    const int out_b_stride = in_channels * out_c_stride;
+
+    _Pragma("omp parallel for collapse(2)")
     for (int b = 0; b < batch_size; ++b) {
         for (int c = 0; c < in_channels; ++c) {
             for (int oh = 0; oh < out_height; ++oh) {
                 const int h_start = oh * stride_ - padding_;
                 const int h_end = std::min(h_start + kernel_size_, in_height);
                 const int h_low = std::max(0, h_start);
-
                 
                 for (int ow = 0; ow < out_width; ++ow) {
                     const int w_start = ow * stride_ - padding_;
                     const int w_end = std::min(w_start + kernel_size_, in_width);
                     const int w_low = std::max(0, w_start);
                     
-                    float max_val = FLT_MIN;
+                    const int out_idx = b * out_b_stride + c * out_c_stride + oh * out_width + ow;
+                    float max_val = -std::numeric_limits<float>::infinity();
                     int max_index = -1;
+                    const int in_base = b * in_b_stride + c * in_c_stride;
+                    
                     for (int kh = h_low; kh < h_end; ++kh) {
                         for (int kw = w_low; kw < w_end; ++kw) {
-                            const size_t idx = tensor_index(shape, b, c, kh, kw);
-                            if (x_data[idx] > max_val) {
-                                max_val = x_data[idx];
-                                max_index = idx;
+                            const int in_idx = in_base + kh * in_width + kw;
+                            if (x_data[in_idx] > max_val) {
+                                max_val = x_data[in_idx];
+                                max_index = in_idx;
                             }
                         }
                     }
                     
-                    const size_t out_idx = ((b * in_channels + c) * out_height + oh) * out_width + ow;
-                    output_data[out_idx] = (max_val == FLT_MIN) ? 0.0f : max_val;
-                    argmax_indices_.push_back(max_index);
+                    output_data[out_idx] = (max_val == -std::numeric_limits<float>::infinity()) ? 0.0f : max_val;
+                    argmax_indices_[out_idx] = max_index;
                 }
             }
         }
     }
 
     std::vector<int> output_shape = {batch_size, in_channels, out_height, out_width};
-    auto output = std::make_shared<Tensor>(output_data, output_shape, x->requires_grad());
-    
-    // 设置输入和输出张量
+    output_ = std::make_shared<Tensor>(std::move(output_data), output_shape, x->requires_grad());
     inputs_ = inputs;
-    output_ = output;
     
-    return output;
+    return output_;
 }
 
 std::vector<TensorPtr> MaxPool2dFunction::backward(const TensorPtr& grad_output) {
@@ -1737,7 +1787,7 @@ std::vector<TensorPtr> MaxPool2dFunction::backward(const TensorPtr& grad_output)
 // Conv2dFunction实现
 TensorPtr Conv2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
-        throw std::invalid_argument("Conv2dFunction requires exactly two inputs (input tensor and weight tensor)");
+        throw std::invalid_argument("Conv2dFunction requires exactly two inputs");
     }
 
     inputs_ = inputs;
@@ -1770,62 +1820,61 @@ TensorPtr Conv2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     }
 
     std::vector<float> output_data(batch_size * out_channels_ * out_height * out_width, 0.0f);
+    const float* x_data = x->data_ptr();
+    const float* weight_data = weight->data_ptr();
 
-    // 获取输入数据和权重数据的指针
-    const std::vector<float>& x_data_vec = x->data();
-    const float* x_data = x_data_vec.data();
+    // 预计算偏移量和步长
+    const int in_c_stride = in_height * in_width;
+    const int in_b_stride = in_channels_ * in_c_stride;
+    const int out_c_stride = out_height * out_width;
+    const int out_b_stride = out_channels_ * out_c_stride;
+    const int weight_oc_stride = in_channels_ * kernel_size_ * kernel_size_;
+    const int weight_ic_stride = kernel_size_ * kernel_size_;
 
-    const std::vector<float>& weight_data_vec = weight->data();
-    const float* weight_data = weight_data_vec.data();
-
-    // 卷积计算
+    _Pragma("omp parallel for collapse(2)")
     for (int b = 0; b < batch_size; ++b) {
         for (int oc = 0; oc < out_channels_; ++oc) {
             for (int oh = 0; oh < out_height; ++oh) {
+                const int h_start = oh * stride_ - padding_;
+                const int h_end = std::min(h_start + kernel_size_, in_height);
+                const int h_low = std::max(0, h_start);
+
                 for (int ow = 0; ow < out_width; ++ow) {
+                    const int w_start = ow * stride_ - padding_;
+                    const int w_end = std::min(w_start + kernel_size_, in_width);
+                    const int w_low = std::max(0, w_start);
+
                     float sum = 0.0f;
+                    const int out_idx = b * out_b_stride + oc * out_c_stride + oh * out_width + ow;
 
                     for (int ic = 0; ic < in_channels_; ++ic) {
-                        for (int kh = 0; kh < kernel_size_; ++kh) {
-                            for (int kw = 0; kw < kernel_size_; ++kw) {
-                                const int ih = oh * stride_ + kh - padding_;
-                                const int iw = ow * stride_ + kw - padding_;
+                        const int in_base = b * in_b_stride + ic * in_c_stride;
+                        const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
 
-                                if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                    // 输入索引计算
-                                    const size_t input_idx = 
-                                        b * in_channels_ * in_height * in_width + 
-                                        ic * in_height * in_width + 
-                                        ih * in_width + iw;
+                        for (int kh = h_low; kh < h_end; ++kh) {
+                            const int in_h_idx = (kh - h_start) * in_width;
+                            const int weight_h_idx = (kh - h_low) * kernel_size_;
 
-                                    // 权重索引计算
-                                    const size_t weight_idx = 
-                                        oc * in_channels_ * kernel_size_ * kernel_size_ + 
-                                        ic * kernel_size_ * kernel_size_ + 
-                                        kh * kernel_size_ + kw;
-
-                                    sum += x_data[input_idx] * weight_data[weight_idx];
-                                }
+                            for (int kw = w_low; kw < w_end; ++kw) {
+                                const int in_idx = in_base + kh * in_width + kw;
+                                const int weight_idx = weight_base + weight_h_idx + (kw - w_low);
+                                sum += x_data[in_idx] * weight_data[weight_idx];
                             }
                         }
                     }
-
-                    // 输出索引计算
-                    const size_t output_idx = 
-                        b * out_channels_ * out_height * out_width + 
-                        oc * out_height * out_width + 
-                        oh * out_width + ow;
-
-                    output_data[output_idx] = sum;
+                    output_data[out_idx] = sum;
                 }
             }
         }
     }
 
     std::vector<int> output_shape = {batch_size, out_channels_, out_height, out_width};
-    output_ = std::make_shared<Tensor>(output_data, output_shape, inputs[0]->requires_grad() || inputs[1]->requires_grad());
+    output_ = std::make_shared<Tensor>(
+        std::move(output_data), 
+        output_shape,
+        inputs[0]->requires_grad() || inputs[1]->requires_grad()
+    );
 
-    // 如果需要梯度，设置梯度函数
     if (output_->requires_grad()) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -1836,57 +1885,59 @@ TensorPtr Conv2dFunction::apply(const std::vector<TensorPtr>& inputs) {
 }
 
 std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(2);
-
+    std::vector<TensorPtr> grads(2, nullptr);
     const auto& x = inputs_[0];
     const auto& weight = inputs_[1];
 
     const int batch_size = input_shape_[0];
-    const int in_channels = input_shape_[1];
     const int in_height = input_shape_[2];
     const int in_width = input_shape_[3];
-
     const int out_height = grad_output->shape()[2];
     const int out_width = grad_output->shape()[3];
 
-    // 初始化梯度
-    std::vector<float> grad_x_data(batch_size * in_channels * in_height * in_width, 0.0f);
-    std::vector<float> grad_weight_data(out_channels_ * in_channels_ * kernel_size_ * kernel_size_, 0.0f);
+    // 预计算步长
+    const int in_c_stride = in_height * in_width;
+    const int in_b_stride = in_channels_ * in_c_stride;
+    const int out_c_stride = out_height * out_width;
+    const int out_b_stride = out_channels_ * out_c_stride;
+    const int weight_oc_stride = in_channels_ * kernel_size_ * kernel_size_;
+    const int weight_ic_stride = kernel_size_ * kernel_size_;
 
-    const std::vector<float>& grad_output_data = grad_output->data();
-    const std::vector<float>& x_data = x->data();
-    const std::vector<float>& weight_data = weight->data();
-
-    // 计算 grad_x
+    // grad_x
     if (x->requires_grad()) {
+        std::vector<float> grad_x_data(batch_size * in_channels_ * in_height * in_width, 0.0f);
+        const float* grad_output_data = grad_output->data_ptr();
+        const float* weight_data = weight->data_ptr();
+
+        _Pragma("omp parallel for collapse(2)")
         for (int b = 0; b < batch_size; ++b) {
             for (int oc = 0; oc < out_channels_; ++oc) {
                 for (int oh = 0; oh < out_height; ++oh) {
+                    const int h_start = oh * stride_ - padding_;
+                    const int h_end = std::min(h_start + kernel_size_, in_height);
+                    const int h_low = std::max(0, h_start);
+                    
                     for (int ow = 0; ow < out_width; ++ow) {
+                        const int w_start = ow * stride_ - padding_;
+                        const int w_end = std::min(w_start + kernel_size_, in_width);
+                        const int w_low = std::max(0, w_start);
+                        
+                        const float grad_val = grad_output_data[
+                            b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
+                        
                         for (int ic = 0; ic < in_channels_; ++ic) {
-                            for (int kh = 0; kh < kernel_size_; ++kh) {
-                                for (int kw = 0; kw < kernel_size_; ++kw) {
-                                    const int ih = oh * stride_ + kh - padding_;
-                                    const int iw = ow * stride_ + kw - padding_;
-
-                                    if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                        const size_t input_idx = 
-                                            b * in_channels * in_height * in_width + 
-                                            ic * in_height * in_width + 
-                                            ih * in_width + iw;
-
-                                        const size_t weight_idx = 
-                                            oc * in_channels_ * kernel_size_ * kernel_size_ + 
-                                            ic * kernel_size_ * kernel_size_ + 
-                                            kh * kernel_size_ + kw;
-
-                                        const size_t grad_output_idx = 
-                                            b * out_channels_ * out_height * out_width + 
-                                            oc * out_height * out_width + 
-                                            oh * out_width + ow;
-
-                                        grad_x_data[input_idx] += grad_output_data[grad_output_idx] * weight_data[weight_idx];
-                                    }
+                            const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
+                            
+                            for (int kh = h_low; kh < h_end; ++kh) {
+                                const int weight_h_idx = (kh - h_low) * kernel_size_;
+                                const int in_h_idx = kh * in_width;
+                                
+                                for (int kw = w_low; kw < w_end; ++kw) {
+                                    const int weight_idx = weight_base + weight_h_idx + (kw - w_low);
+                                    const int in_idx = b * in_b_stride + ic * in_c_stride + in_h_idx + kw;
+                                    
+                                    #pragma omp atomic
+                                    grad_x_data[in_idx] += grad_val * weight_data[weight_idx];
                                 }
                             }
                         }
@@ -1894,40 +1945,41 @@ std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
                 }
             }
         }
-
-        grads[0] = std::make_shared<Tensor>(grad_x_data, input_shape_, false);
+        grads[0] = std::make_shared<Tensor>(std::move(grad_x_data), input_shape_, false);
     }
 
-    // 计算 grad_weight
+    // grad_weight
     if (weight->requires_grad()) {
-        for (int b = 0; b < batch_size; ++b) {
-            for (int oc = 0; oc < out_channels_; ++oc) {
-                for (int oh = 0; oh < out_height; ++oh) {
-                    for (int ow = 0; ow < out_width; ++ow) {
-                        for (int ic = 0; ic < in_channels_; ++ic) {
-                            for (int kh = 0; kh < kernel_size_; ++kh) {
-                                for (int kw = 0; kw < kernel_size_; ++kw) {
-                                    const int ih = oh * stride_ + kh - padding_;
+        std::vector<float> grad_weight_data(weight->size(), 0.0f);
+        const float* grad_output_data = grad_output->data_ptr();
+        const float* x_data = x->data_ptr();
+
+        _Pragma("omp parallel for collapse(2)")
+        for (int oc = 0; oc < out_channels_; ++oc) {
+            for (int ic = 0; ic < in_channels_; ++ic) {
+                for (int kh = 0; kh < kernel_size_; ++kh) {
+                    for (int kw = 0; kw < kernel_size_; ++kw) {
+                        for (int b = 0; b < batch_size; ++b) {
+                            for (int oh = 0; oh < out_height; ++oh) {
+                                const int ih = oh * stride_ + kh - padding_;
+                                if (ih < 0 || ih >= in_height) continue;
+                                
+                                for (int ow = 0; ow < out_width; ++ow) {
                                     const int iw = ow * stride_ + kw - padding_;
-
-                                    if (ih >= 0 && ih < in_height && iw >= 0 && iw < in_width) {
-                                        const size_t input_idx = 
-                                            b * in_channels * in_height * in_width + 
-                                            ic * in_height * in_width + 
-                                            ih * in_width + iw;
-
-                                        const size_t weight_idx = 
-                                            oc * in_channels_ * kernel_size_ * kernel_size_ + 
-                                            ic * kernel_size_ * kernel_size_ + 
-                                            kh * kernel_size_ + kw;
-
-                                        const size_t grad_output_idx = 
-                                            b * out_channels_ * out_height * out_width + 
-                                            oc * out_height * out_width + 
-                                            oh * out_width + ow;
-
-                                        grad_weight_data[weight_idx] += grad_output_data[grad_output_idx] * x_data[input_idx];
-                                    }
+                                    if (iw < 0 || iw >= in_width) continue;
+                                    
+                                    const float grad_val = grad_output_data[
+                                        b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
+                                    
+                                    const float x_val = x_data[
+                                        b * in_b_stride + ic * in_c_stride + ih * in_width + iw];
+                                    
+                                    const int weight_idx = oc * weight_oc_stride + 
+                                                          ic * weight_ic_stride + 
+                                                          kh * kernel_size_ + kw;
+                                    
+                                    #pragma omp atomic
+                                    grad_weight_data[weight_idx] += grad_val * x_val;
                                 }
                             }
                         }
@@ -1935,8 +1987,7 @@ std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
                 }
             }
         }
-
-        grads[1] = std::make_shared<Tensor>(grad_weight_data, weight->shape(), false);
+        grads[1] = std::make_shared<Tensor>(std::move(grad_weight_data), weight->shape(), false);
     }
 
     return grads;

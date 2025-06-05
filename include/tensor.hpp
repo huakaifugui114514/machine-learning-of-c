@@ -14,7 +14,7 @@ class Function;
 using TensorPtr = std::shared_ptr<Tensor>;
 using FunctionPtr = std::shared_ptr<Function>;
 
-// Tensor类 - 框架的核心数据结构
+// Tensor类
 class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
     Tensor(const std::vector<float>& data, const std::vector<int>& shape, bool requires_grad = false);

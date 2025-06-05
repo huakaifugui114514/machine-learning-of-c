@@ -62,7 +62,13 @@ std::pair<std::vector<TensorPtr>, std::vector<int>> DataLoader::get_next_batch()
     for (int i = 0; i < batch_size_ && current_index_ < indices_.size(); ++i) {
         int index = indices_[current_index_++];
         auto [file_path, label] = data_files_[index];
-        TensorPtr image = load_image(file_path);
+        TensorPtr image = nullptr;
+        try {
+            image = load_image(file_path);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to load image: " << file_path << " - " << e.what() << std::endl;
+            continue; // 跳过损坏图像
+        }
         if (image) {
             batch_images.push_back(image);
             batch_labels.push_back(label);
