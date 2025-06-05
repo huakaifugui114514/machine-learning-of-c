@@ -36,38 +36,37 @@ Tensor::Tensor(std::vector<float>&& data, const std::vector<int>& shape, bool re
 }
 
 void Tensor::backward(const TensorPtr& grad_output) {
-    // 如果没有提供梯度输出，假设是标量损失
+    // 步骤1：创建或验证梯度张量
+    TensorPtr grad_tensor;
     if (grad_output == nullptr) {
-        if (size_ != 1) {
-            throw std::invalid_argument("backward should be called only on scalar tensors when grad_output is not provided");
-        }
-        // 如果梯度为空，初始化为 1.0f，否则进行累积
-        if (grad_.empty()) {
-            grad_ = {1.0f};
-        } else {
-            grad_[0] += 1.0f;
-        }
+        if (size_ != 1) throw std::invalid_argument("grad_output must not be null for non-scalar tensor");
+        grad_tensor = std::make_shared<Tensor>(
+            std::vector<float>{1.0f}, std::vector<int>{1}, false
+        );
     } else {
-        const auto& grad_output_data = grad_output->data();
-        // 如果梯度为空，初始化梯度
-        if (grad_.empty()) {
-            grad_ = grad_output_data;
-        } else {
-            // 梯度累积
-            for (size_t i = 0; i < grad_.size(); ++i) {
-                grad_[i] += grad_output_data[i];
-            }
+        // 验证梯度形状匹配
+        if (grad_output->size() != size_) throw std::invalid_argument("grad_output size does not match tensor size");
+        grad_tensor = grad_output;
+    }
+
+    // 步骤2：正确累加梯度
+    if (grad_.empty()) {
+        grad_ = grad_tensor->data();  // 初始化梯度
+    } else {
+        const auto& grad_data = grad_tensor->data();
+        for (size_t i = 0; i < grad_.size(); ++i) {
+            grad_[i] += grad_data[i];  // 累加梯度
         }
     }
 
-    // 执行反向传播
+    // 步骤3：执行反向传播
     if (grad_fn_) {
-        // 调用梯度函数的 backward 方法，传入当前张量的梯度
-        auto grads = grad_fn_->backward(grad_output ? grad_output : shared_from_this());
-        // 将梯度传递给子节点
+        // 传递正确的梯度张量
+        auto grads = grad_fn_->backward(grad_tensor);
+        
         for (size_t i = 0; i < children_.size(); ++i) {
-            if (children_[i]->requires_grad()) {
-                children_[i]->backward(grads[i]);
+            if (children_[i]->requires_grad() && grads[i]) {
+                children_[i]->backward(grads[i]);  // 递归反向传播
             }
         }
     }
