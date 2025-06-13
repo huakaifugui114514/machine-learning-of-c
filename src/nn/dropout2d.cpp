@@ -18,6 +18,10 @@ TensorPtr dropout2d(const TensorPtr& input, float p, bool training) {
         throw std::invalid_argument("dropout2d: input must be 4D tensor");
     }
 
+    if (p < 0 || p >= 1) {
+        throw std::invalid_argument("Dropout probability must be in [0, 1)");
+    }
+
     // 获取输入形状
     const auto& shape = input->shape();
     int batch_size = shape[0];
@@ -32,7 +36,7 @@ TensorPtr dropout2d(const TensorPtr& input, float p, bool training) {
 
     // 生成随机数引擎
     std::random_device rd;
-    std::mt19937 gen(rd());
+    static thread_local std::mt19937 gen(std::random_device{}());
     std::bernoulli_distribution dist(1.0f - p);  // 以1-p的概率生成true（保留）
 
     // 遍历mask的数据，按通道应用伯努利分布

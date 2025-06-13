@@ -27,10 +27,10 @@ Linear::Linear(int in_features, int out_features, bool bias)
     
     weight_ = tensor(weight_data, {in_features_, out_features_}, true);
     
-    // 初始化偏置（如果需要）
+    // 初始化偏置（如果需要）- 保持原始1D形状
     if (bias) {
         std::vector<float> bias_data(out_features, 0.0f);
-        bias_ = tensor(bias_data, {1, out_features}, true);
+        bias_ = tensor(bias_data, {out_features}, true);
     }
 }
 
@@ -49,9 +49,26 @@ TensorPtr Linear::forward(const TensorPtr& x) {
     // 执行矩阵乘法
     auto output = matmul(x_contiguous, weight_);
     
-    // 如果有偏置，加上偏置（使用广播）
+    // 如果有偏置，动态重塑偏置形状以匹配输出维度
     if (has_bias_) {
-        output = output + bias_;
+        // 获取输出张量的维度数
+        const int output_ndim = output->shape().size();
+        
+        // 构建新的偏置形状：第一个维度为1，第二个维度为输出特征数，其余维度为1
+        std::vector<int> bias_shape;
+        bias_shape.push_back(1);  // 批处理维度设为1（广播）
+        bias_shape.push_back(out_features_);  // 特征维度
+        
+        // 对于更高维度（空间维度），设为1以便广播
+        for (int i = 2; i < output_ndim; i++) {
+            bias_shape.push_back(1);
+        }
+        
+        // 重塑偏置张量
+        auto reshaped_bias = reshape(bias_, bias_shape);
+        
+        // 添加到输出
+        output = output + reshaped_bias;
     }
     
     return output;

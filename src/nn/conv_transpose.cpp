@@ -11,14 +11,9 @@ namespace nn {
 
 // 索引计算工具函数
 inline size_t tensor_index(const std::vector<int>& shape, int b, int c, int h, int w) {
-    size_t index = b;
-    for (size_t i = 1; i < shape.size(); ++i) {
-        index *= shape[i];
-    }
-    if (shape.size() > 1) index += c * shape[2] * shape[3];
-    if (shape.size() > 2) index += h * shape[3];
-    if (shape.size() > 3) index += w;
-    return index;
+    const size_t c_stride = shape.size() > 1 ? shape[2] * shape[3] : 0;
+    const size_t h_stride = shape.size() > 2 ? shape[3] : 0;
+    return b * (shape[1] * c_stride) + c * c_stride + h * h_stride + w;
 }
 
 ConvTranspose2d::ConvTranspose2d(int in_channels, int out_channels, int kernel_size, int stride, int padding, bool use_bias)

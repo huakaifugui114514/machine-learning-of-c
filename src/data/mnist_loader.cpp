@@ -1,8 +1,10 @@
 // mnist_loader.cpp
-#include "mnist_loader.hpp"
+#include "data/mnist_loader.hpp"
 #include <stdexcept>
 #include <cstdint>
 
+namespace dlt {
+namespace data {
 std::vector<std::vector<float>> MNISTLoader::load_images(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) throw std::runtime_error("Failed to open file: " + path);
@@ -55,3 +57,6 @@ std::vector<int> MNISTLoader::load_labels(const std::string& path) {
     file.read(reinterpret_cast<char*>(buffer.data()), num_labels);
     return std::vector<int>(buffer.begin(), buffer.end());
 }
+
+} // namespace data
+} // namespace dlt

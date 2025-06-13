@@ -19,23 +19,35 @@ namespace dlt {
 // 内置函数
 
 /**
- * 计算两个形状的广播结果形状
+ * 计算两个形状的广播结果形状（从最低维度开始比较）
  * 
  * @param shape_a 第一个张量的形状
  * @param shape_b 第二个张量的形状
  * @return 广播后的形状
  * @throws std::invalid_argument 如果形状不兼容
  */
+// 替换原有的 broadcast_shapes 函数
 inline std::vector<int> broadcast_shapes(const std::vector<int>& shape_a, const std::vector<int>& shape_b) {
     size_t max_dims = std::max(shape_a.size(), shape_b.size());
     std::vector<int> result(max_dims);
     
-    for (int i = max_dims - 1, j = shape_a.size() - 1, k = shape_b.size() - 1; i >= 0; --i, --j, --k) {
-        int dim_a = j >= 0 ? shape_a[j] : 1;
-        int dim_b = k >= 0 ? shape_b[k] : 1;
+    int a_idx = shape_a.size() - 1;
+    int b_idx = shape_b.size() - 1;
+    
+    for (int i = max_dims - 1; i >= 0; --i) {
+        int dim_a = (a_idx >= 0) ? shape_a[a_idx--] : 1;
+        int dim_b = (b_idx >= 0) ? shape_b[b_idx--] : 1;
         
         if (dim_a != dim_b && dim_a != 1 && dim_b != 1) {
-            throw std::invalid_argument("Shapes are not broadcast-compatible");
+            std::ostringstream oss;
+            oss << "Broadcast dimension mismatch: dim[" << i << "] "
+                << dim_a << " vs " << dim_b << "\n"
+                << "  Shape A: [";
+            for (int d : shape_a) oss << d << " ";
+            oss << "]\n  Shape B: [";
+            for (int d : shape_b) oss << d << " ";
+            oss << "]";
+            throw std::invalid_argument(oss.str());
         }
         
         result[i] = std::max(dim_a, dim_b);
@@ -43,7 +55,7 @@ inline std::vector<int> broadcast_shapes(const std::vector<int>& shape_a, const 
     return result;
 }
 
-// 添加广播计算函数
+// 广播计算函数
 /**
  * 执行广播计算
  * 
@@ -66,22 +78,30 @@ inline void broadcast_compute(
     const auto& b_data = b->data();
     
     // 计算每个张量的步长(考虑广播)
-    std::vector<int> a_strides(out_shape.size(), 0);
-    std::vector<int> b_strides(out_shape.size(), 0);
+    std::vector<size_t> a_strides(out_shape.size(), 0);
+    std::vector<size_t> b_strides(out_shape.size(), 0);
     
-    int a_stride = 1;
-    int b_stride = 1;
-    for (int i = out_shape.size() - 1, j = a_shape.size() - 1, k = b_shape.size() - 1; i >= 0; --i, --j, --k) {
-        a_strides[i] = (j >= 0 && a_shape[j] > 1) ? a_stride : 0;
-        b_strides[i] = (k >= 0 && b_shape[k] > 1) ? b_stride : 0;
+    size_t a_stride = 1;
+    size_t b_stride = 1;
+    
+    // 从最低维度开始计算
+    for (int i = out_shape.size() - 1; i >= 0; --i) {
+        int a_dim = (i >= out_shape.size() - a_shape.size()) ? 
+                   a_shape[i - (out_shape.size() - a_shape.size())] : 1;
+        int b_dim = (i >= out_shape.size() - b_shape.size()) ? 
+                   b_shape[i - (out_shape.size() - b_shape.size())] : 1;
         
-        a_stride *= (j >= 0) ? a_shape[j] : 1;
-        b_stride *= (k >= 0) ? b_shape[k] : 1;
+        a_strides[i] = (a_dim > 1) ? a_stride : 0;
+        b_strides[i] = (b_dim > 1) ? b_stride : 0;
+        
+        a_stride *= (a_dim > 0) ? a_dim : 1;
+        b_stride *= (b_dim > 0) ? b_dim : 1;
     }
     
     // 计算输出大小
     size_t total_size = 1;
     for (int dim : out_shape) {
+        if (dim < 0) throw std::invalid_argument("Negative dimension in shape");
         total_size *= dim;
     }
     
@@ -94,13 +114,20 @@ inline void broadcast_compute(
         size_t b_index = 0;
         size_t remainder = index;
         
+        // 从最高维度开始计算索引
         for (int i = 0; i < out_shape.size(); ++i) {
             int dim_size = out_shape[i];
-            int pos = remainder % dim_size;
+            int coord = remainder % dim_size;
             remainder /= dim_size;
             
-            a_index += a_strides[i] * pos;
-            b_index += b_strides[i] * pos;
+            // 计算输入索引
+            if (a_strides[i] > 0) {
+                a_index += (coord % a_shape[i]) * a_strides[i];
+            }
+            
+            if (b_strides[i] > 0) {
+                b_index += (coord % b_shape[i]) * b_strides[i];
+            }
         }
         
         result[index] = op(a_data[a_index], b_data[b_index]);
@@ -2178,84 +2205,41 @@ TensorPtr ExpandFunction::apply(const std::vector<TensorPtr>& inputs) {
     const auto& input_shape = input->shape();
     const auto& input_data = input->data();
     
-    // 检查广播兼容性
-    if (new_shape_.size() < input_shape.size()) {
-        throw std::invalid_argument("New shape must have at least as many dimensions as input");
-    }
-    
-    // 对齐维度（在输入形状前面添加维度1）
-    std::vector<int> aligned_input_shape = input_shape;
-    while (aligned_input_shape.size() < new_shape_.size()) {
-        aligned_input_shape.insert(aligned_input_shape.begin(), 1);
-    }
-    
-    // 检查每个维度是否兼容
-    for (size_t i = 0; i < new_shape_.size(); i++) {
-        if (aligned_input_shape[i] != new_shape_[i] && 
-            aligned_input_shape[i] != 1) {
-            std::ostringstream oss;
-            oss << "The size of dimension " << i << " must be 1 or equal to the new shape. "
-                << "Current: " << aligned_input_shape[i] << ", new shape: " << new_shape_[i];
-            throw std::invalid_argument(oss.str());
-        }
-    }
-    
-    // 计算输出大小
-    size_t total_size = 1;
-    for (int dim : new_shape_) {
-        total_size *= dim;
-    }
-    
-    // 计算输入和输出张量的步长
-    std::vector<size_t> input_strides(aligned_input_shape.size(), 0);
-    size_t input_stride = 1;
-    for (int i = aligned_input_shape.size() - 1; i >= 0; --i) {
-        input_strides[i] = (aligned_input_shape[i] > 1) ? input_stride : 0;
-        input_stride *= aligned_input_shape[i];
-    }
-    
-    std::vector<size_t> output_strides(new_shape_.size(), 1);
-    for (int i = new_shape_.size() - 2; i >= 0; --i) {
-        output_strides[i] = output_strides[i+1] * new_shape_[i+1];
-    }
-    
-    // 创建扩展后的数据
-    std::vector<float> expanded_data(total_size);
-    
-    // 使用索引计算填充数据
-    #pragma omp parallel for
-    for (size_t i = 0; i < total_size; ++i) {
-        size_t input_index = 0;
-        size_t remainder = i;
+    // 直接使用广播形状计算
+    try {
+        // 计算广播形状
+        auto out_shape = broadcast_shapes(input_shape, new_shape_);
         
-        // 计算每个维度上的坐标
-        for (int j = new_shape_.size() - 1; j >= 0; --j) {
-            int dim_size = new_shape_[j];
-            int coord = remainder % dim_size;
-            remainder /= dim_size;
-            
-            // 如果输入在该维度上大小为1，则使用0坐标
-            if (input_strides[j] != 0) {
-                coord = coord % aligned_input_shape[j];
-            } else {
-                coord = 0;
-            }
-            input_index += coord * input_strides[j];
+        // 创建输出数据
+        std::vector<float> output_data;
+        const auto& dummy = tensor({0.0f}, {1}); // 用于广播计算的占位符
+        
+        // 使用广播计算函数
+        broadcast_compute(
+            input, dummy, output_data, out_shape,
+            [](float a_val, float b_val) { return a_val; } // 只需返回输入值
+        );
+        
+        bool requires_grad = input->requires_grad();
+        output_ = std::make_shared<Tensor>(output_data, out_shape, requires_grad);
+        
+        if (requires_grad) {
+            output_->grad_fn_ = shared_from_this();
+            output_->children_ = inputs;
+            output_->is_leaf_ = false;
         }
         
-        expanded_data[i] = input_data[input_index];
+        return output_;
+    } catch (const std::exception& e) {
+        // 添加更具体的错误信息
+        std::ostringstream oss;
+        oss << "Expand failed: from shape [";
+        for (int dim : input_shape) oss << dim << " ";
+        oss << "] to [";
+        for (int dim : new_shape_) oss << dim << " ";
+        oss << "]: " << e.what();
+        throw std::invalid_argument(oss.str());
     }
-    
-    bool requires_grad = input->requires_grad();
-    output_ = std::make_shared<Tensor>(expanded_data, new_shape_, requires_grad);
-    
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    
-    return output_;
 }
 
 /**

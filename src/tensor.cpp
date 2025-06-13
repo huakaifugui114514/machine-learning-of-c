@@ -9,6 +9,11 @@ namespace dlt {
 
 Tensor::Tensor(const std::vector<float>& data, const std::vector<int>& shape, bool requires_grad)
     : data_(data), shape_(shape), requires_grad_(requires_grad), is_leaf_(true) {
+    for (int dim : shape) {
+        if (dim <= 0) {
+            throw std::invalid_argument("Tensor dimensions must be positive");
+        }
+    }
     size_ = 1;
     for (int dim : shape_) {
         size_ *= dim;
@@ -23,6 +28,11 @@ Tensor::Tensor(const std::vector<float>& data, const std::vector<int>& shape, bo
 
 Tensor::Tensor(std::vector<float>&& data, const std::vector<int>& shape, bool requires_grad)
     : data_(std::move(data)), shape_(shape), requires_grad_(requires_grad), is_leaf_(true) {
+    for (int dim : shape) {
+        if (dim <= 0) {
+            throw std::invalid_argument("Tensor dimensions must be positive");
+        }
+    }
     size_ = 1;
     for (int dim : shape_) {
         size_ *= dim;

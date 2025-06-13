@@ -51,17 +51,30 @@ Conv2d::Conv2d(int in_channels, int out_channels, int kernel_size, int stride, i
 }
 
 TensorPtr Conv2d::forward(const TensorPtr& x) {
+    if (x->shape()[1] != in_channels_) {
+        throw std::invalid_argument("Input channels mismatch. Expected " + 
+                                   std::to_string(in_channels_) + ", got " + 
+                                   std::to_string(x->shape()[1]));
+    }
+
     auto conv_fn = std::make_shared<dlt::Conv2dFunction>(in_channels_, out_channels_, kernel_size_, stride_, padding_);
     auto output = conv_fn->apply({x, weight_});
 
     if (has_bias_) {
-        // 正确的目标形状：[1, out_channels_, 1, 1]
-        std::vector<int> bias_shape(4, 1);
-        bias_shape[1] = out_channels_;
+        // 确保偏置张量是4D [1, out_channels_, 1, 1]
+        std::vector<int> bias_shape = bias_->shape();
         
-        // 扩展偏置并添加到输出
-        auto expanded_bias = ops::expand(bias_, bias_shape);
-        output = ops::add(output, expanded_bias);
+        // 如果偏置是1D [out_channels_]，重塑为4D
+        if (bias_shape.size() == 1) {
+            bias_ = ops::reshape(bias_, {1, out_channels_, 1, 1});
+        }
+        // 如果偏置是2D [1, out_channels_]，重塑为4D
+        else if (bias_shape.size() == 2 && bias_shape[0] == 1) {
+            bias_ = ops::reshape(bias_, {1, out_channels_, 1, 1});
+        }
+        
+        // 直接相加（依赖广播机制）
+        output = ops::add(output, bias_);
     }
     return output;
 }
