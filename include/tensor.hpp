@@ -46,6 +46,15 @@ public:
     void set_grad_fn(const FunctionPtr& grad_fn) { grad_fn_ = grad_fn; }
     void add_child(const TensorPtr& child) { children_.push_back(child); }
     void set_is_leaf(bool is_leaf) { is_leaf_ = is_leaf; }
+
+     // 添加 [] 运算符重载
+    float& operator[](size_t index) {
+        return data_[index];
+    }
+
+    const float& operator[](size_t index) const {
+        return data_[index];
+    }
     
 protected:
     // 设置梯度函数和子节点（供Function类使用）

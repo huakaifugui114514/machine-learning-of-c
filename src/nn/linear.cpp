@@ -4,11 +4,11 @@
 #include <cmath>
 #include <random>
 #include <stdexcept>
+#include <sstream>
 
 using namespace dlt;
 using namespace dlt::ops;
 using namespace dlt::nn;
-
 
 Linear::Linear(int in_features, int out_features, bool bias)
     : in_features_(in_features), out_features_(out_features), has_bias_(bias) {
@@ -36,25 +36,22 @@ Linear::Linear(int in_features, int out_features, bool bias)
 
 TensorPtr Linear::forward(const TensorPtr& x) {
     // 检查输入特征维度
-    if (x->shape()[1] != in_features_) {
-        throw std::invalid_argument("Input features do not match the layer's in_features.");
+    if (x->shape().size() < 2 || x->shape()[1] != in_features_) {
+        std::ostringstream oss;
+        oss << "Input features (" << (x->shape().size() < 2 ? "invalid" : std::to_string(x->shape()[1]))
+            << ") do not match layer's in_features (" << in_features_ << ")";
+        throw std::invalid_argument(oss.str());
     }
-     
-    // 执行矩阵乘法
-    auto output = matmul(x, weight_);
     
-    // 如果有偏置，加上偏置
+    // 确保输入是连续的
+    auto x_contiguous = contiguous(x);
+    
+    // 执行矩阵乘法
+    auto output = matmul(x_contiguous, weight_);
+    
+    // 如果有偏置，加上偏置（使用广播）
     if (has_bias_) {
-        // 扩展偏置以匹配输出维度
-        int batch_size = x->shape()[0];
-        std::vector<float> expanded_bias_data(batch_size * out_features_);
-        for (int i = 0; i < batch_size; ++i) {
-            std::copy(bias_->data().begin(), bias_->data().end(), expanded_bias_data.begin() + i * out_features_);
-        }
-        
-        auto expanded_bias = tensor(expanded_bias_data, {batch_size, out_features_}, false);
-        
-        output = output + expanded_bias;
+        output = output + bias_;
     }
     
     return output;
@@ -62,12 +59,7 @@ TensorPtr Linear::forward(const TensorPtr& x) {
 
 std::vector<TensorPtr> Linear::parameters() const {
     if (has_bias_) {
-        std::cout << "linear params: " << std::endl;
-        weight_->print();
-        bias_->print();
         return {weight_, bias_};
-    } else {
-        weight_->print();
-        return {weight_};
     }
+    return {weight_};
 }

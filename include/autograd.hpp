@@ -27,7 +27,9 @@ public:
     TensorPtr output_;
 };
 
-// 加法操作的自动微分
+TensorPtr reduce_grad(const TensorPtr& grad_output, const std::vector<int>& target_shape);
+
+// ================== 基本数学运算 ==================
 class AddFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -42,7 +44,6 @@ public:
     std::string name() const override { return "SubFunction"; }
 };
 
-// 乘法操作的自动微分
 class MulFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -50,7 +51,6 @@ public:
     std::string name() const override { return "MulFunction"; }
 };
 
-// 矩阵乘法操作的自动微分
 class MatMulFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -58,7 +58,7 @@ public:
     std::string name() const override { return "MatMulFunction"; }
 };
 
-// ReLU操作的自动微分
+// ================== 激活函数 ==================
 class ReLUFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -66,193 +66,6 @@ public:
     std::string name() const override { return "ReLUFunction"; }
 };
 
-// 求和操作的自动微分
-class SumFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "SumFunction"; }
-};
-
-// Exp操作的自动微分
-class ExpFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "ExpFunction"; }
-};
-
-// Log操作的自动微分
-class LogFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "LogFunction"; }
-};
-
-// Sin操作的自动微分
-class SinFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "SinFunction"; }
-};
-
-// Cos操作的自动微分
-class CosFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "CosFunction"; }
-};
-
-// Tan操作的自动微分
-class TanFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "TanFunction"; }
-};
-
-// Max操作的自动微分
-class MaxFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MaxFunction"; }
-};
-
-// Min操作的自动微分
-class MinFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MinFunction"; }
-};
-
-// Max按维度操作的自动微分
-class MaxDimFunction : public Function {
-public:
-    MaxDimFunction(int dim) : dim_(dim) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MaxDimFunction"; }
-private:
-    int dim_;
-};
-
-// Min按维度操作的自动微分
-class MinDimFunction : public Function {
-public:
-    MinDimFunction(int dim) : dim_(dim) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MinDimFunction"; }
-private:
-    int dim_;
-};
-
-// Mean操作的自动微分
-class MeanFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MeanFunction"; }
-};
-
-// Mean按维度操作的自动微分
-class MeanDimFunction : public Function {
-public:
-    MeanDimFunction(int dim) : dim_(dim) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "MeanDimFunction"; }
-private:
-    int dim_;
-};
-
-// Reshape操作的自动微分
-class ReshapeFunction : public Function {
-public:
-    ReshapeFunction(const std::vector<int>& new_shape) : new_shape_(new_shape) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "ReshapeFunction"; }
-private:
-    std::vector<int> new_shape_;
-};
-
-// Transpose操作的自动微分
-class TransposeFunction : public Function {
-public:
-    TransposeFunction(int dim0, int dim1) : dim0_(dim0), dim1_(dim1) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "TransposeFunction"; }
-private:
-    int dim0_;
-    int dim1_;
-};
-
-// Concat操作的自动微分
-class ConcatFunction : public Function {
-public:
-    ConcatFunction(int dim) : dim_(dim) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "ConcatFunction"; }
-private:
-    int dim_;
-};
-
-// Split操作的自动微分
-class SplitFunction : public Function {
-public:
-    SplitFunction(int dim, int sections) : dim_(dim), sections_(sections) {}
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "SplitFunction"; }
-private:
-    int dim_;
-    int sections_;
-};
-
-// Dot操作的自动微分
-class DotFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "DotFunction"; }
-};
-
-// Abs操作的自动微分
-class AbsFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "AbsFunction"; }
-};
-
-// ContiguousFunction 类
-class ContiguousFunction : public Function {
-public:
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "ContiguousFunction"; }
-};
-
-// ExpandFunction
-class ExpandFunction : public Function {
-public:
-    ExpandFunction(const std::vector<int>& new_shape);
-    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
-    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
-    std::string name() const override { return "ExpandFunction"; }
-private:
-    std::vector<int> new_shape_;
-};
-
-// Sigmoid操作的自动微分
 class SigmoidFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -260,7 +73,6 @@ public:
     std::string name() const override { return "SigmoidFunction"; }
 };
 
-// Tanh操作的自动微分
 class TanhFunction : public Function {
 public:
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
@@ -268,26 +80,207 @@ public:
     std::string name() const override { return "TanhFunction"; }
 };
 
-// Softmax操作的自动微分（带维度参数）
 class SoftmaxFunction : public Function {
 public:
     SoftmaxFunction(int dim = -1) : dim_(dim) {}
+    
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
     std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
     std::string name() const override { return "SoftmaxFunction"; }
+
 private:
-    int dim_;  // 归一化的维度
+    int dim_; // Softmax计算的维度
 };
 
+// ================== 张量操作 ==================
+class SumFunction : public Function {
+public:
+    SumFunction(int dim = -1, bool keepdims = false) 
+        : dim_(dim), keepdims_(keepdims) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "SumFunction"; }
 
-// nn操作
-// 平均池化操作的自动微分
+private:
+    int dim_;        // 求和的维度
+    bool keepdims_;  // 是否保持维度
+};
+
+class ExpFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ExpFunction"; }
+};
+
+class LogFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "LogFunction"; }
+};
+
+class SinFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "SinFunction"; }
+};
+
+class CosFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "CosFunction"; }
+};
+
+class TanFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "TanFunction"; }
+};
+
+class MaxFunction : public Function {
+public:
+    MaxFunction(int dim = -1, bool keepdims = false) 
+        : dim_(dim), keepdims_(keepdims) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "MaxFunction"; }
+
+private:
+    int dim_;
+    bool keepdims_;
+    std::vector<size_t> argmax_indices_; // 存储最大值的索引
+};
+
+class MinFunction : public Function {
+public:
+    MinFunction(int dim = -1, bool keepdims = false) 
+        : dim_(dim), keepdims_(keepdims) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "MinFunction"; }
+
+private:
+    int dim_;
+    bool keepdims_;
+    std::vector<size_t> argmin_indices_; // 存储最小值的索引
+};
+
+class MeanFunction : public Function {
+public:
+    MeanFunction(int dim = -1, bool keepdims = false) 
+        : dim_(dim), keepdims_(keepdims) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "MeanFunction"; }
+
+private:
+    int dim_;
+    bool keepdims_;
+};
+
+class ReshapeFunction : public Function {
+public:
+    ReshapeFunction(const std::vector<int>& new_shape) : new_shape_(new_shape) {}
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ReshapeFunction"; }
+    
+private:
+    std::vector<int> new_shape_;
+};
+
+class TransposeFunction : public Function {
+public:
+    TransposeFunction(int dim0 = 0, int dim1 = 1) 
+        : dim0_(dim0), dim1_(dim1) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "TransposeFunction"; }
+
+private:
+    int dim0_;
+    int dim1_;
+};
+
+class ConcatFunction : public Function {
+public:
+    ConcatFunction(int dim = 0) : dim_(dim) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ConcatFunction"; }
+
+private:
+    int dim_;
+};
+
+class SplitFunction : public Function {
+public:
+    SplitFunction(int dim, int sections, int index) 
+        : dim_(dim), sections_(sections), index_(index) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "SplitFunction"; }
+
+private:
+    int dim_;
+    int sections_;
+    int index_; // 当前分割部分的索引
+    size_t slice_index_; // 当前分割部分的起始位置
+};
+
+class DotFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "DotFunction"; }
+};
+
+class AbsFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "AbsFunction"; }
+};
+
+class ContiguousFunction : public Function {
+public:
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ContiguousFunction"; }
+};
+
+class ExpandFunction : public Function {
+public:
+    ExpandFunction(const std::vector<int>& new_shape) 
+        : new_shape_(new_shape) {}
+    
+    TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
+    std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
+    std::string name() const override { return "ExpandFunction"; }
+
+private:
+    std::vector<int> new_shape_;
+};
+
+// ================== 神经网络操作 ==================
 class AvgPool2dFunction : public Function {
 public:
     AvgPool2dFunction(int kernel_size, int stride, int padding);
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
     std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
     std::string name() const override { return "AvgPool2dFunction"; }
+    
 private:
     int kernel_size_;
     int stride_;
@@ -295,13 +288,13 @@ private:
     std::vector<int> input_shape_; // 用于存储前向传播时的输入形状
 };
 
-// 最大池化操作的自动微分
 class MaxPool2dFunction : public Function {
 public:
     MaxPool2dFunction(int kernel_size, int stride, int padding);
     TensorPtr apply(const std::vector<TensorPtr>& inputs) override;
     std::vector<TensorPtr> backward(const TensorPtr& grad_output) override;
     std::string name() const override { return "MaxPool2dFunction"; }
+    
 private:
     int kernel_size_;
     int stride_;
@@ -310,7 +303,6 @@ private:
     std::vector<int> argmax_indices_; // 用于存储最大值的索引
 };
 
-// 卷积操作的自动微分
 class Conv2dFunction : public Function {
 public:
     Conv2dFunction(int in_channels, int out_channels, int kernel_size, int stride, int padding)

@@ -55,13 +55,14 @@ TensorPtr Conv2d::forward(const TensorPtr& x) {
     auto output = conv_fn->apply({x, weight_});
 
     if (has_bias_) {
-        // 扩展偏置维度以匹配输出形状
-        std::vector<int> bias_shape = output->shape();
-        bias_shape[1] = 1;
+        // 正确的目标形状：[1, out_channels_, 1, 1]
+        std::vector<int> bias_shape(4, 1);
+        bias_shape[1] = out_channels_;
+        
+        // 扩展偏置并添加到输出
         auto expanded_bias = ops::expand(bias_, bias_shape);
         output = ops::add(output, expanded_bias);
     }
-
     return output;
 }
 

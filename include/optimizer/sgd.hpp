@@ -1,29 +1,27 @@
-#ifndef OPTIMIZER_SGD_HPP
-#define OPTIMIZER_SGD_HPP
-
-#include "optimizer.hpp"
-#include <mutex>
+// sgd.hpp
+#pragma once
+#include <vector>
+#include <memory>
+#include "tensor.hpp"
 
 namespace dlt {
 namespace optimizer {
 
-class SGD : public Optimizer {
+class SGD {
 public:
-    SGD(float lr = 0.01, float momentum = 0.0);
-
-    void step() override;
-    void zero_grad() override;
-    void add_parameters(const std::vector<TensorPtr>& params) override;
+    // 动量参数可选
+    SGD(float lr, float momentum = 0.0f, float clip_value = 1.0f);
+    void add_parameters(const std::vector<std::shared_ptr<Tensor>>& params);
+    void step();
+    void zero_grad();
 
 private:
-    std::vector<TensorPtr> parameters_;
     float lr_;
     float momentum_;
+    float clip_value_;
+    std::vector<std::shared_ptr<Tensor>> parameters_;
     std::vector<std::vector<float>> velocities_;
-    std::mutex mtx_;
 };
 
 } // namespace optimizer
 } // namespace dlt
-
-#endif // OPTIMIZER_SGD_HPP

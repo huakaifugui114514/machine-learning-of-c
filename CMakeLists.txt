@@ -4,6 +4,9 @@ project(DeepLearningFramework)
 # 设置 C++ 标准
 set(CMAKE_CXX_STANDARD 17)
 
+# 设置调试信息
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
+
 # 设置链接库的搜索路径(系统默认的)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,/usr/lib/x86_64-linux-gnu")
 
@@ -12,8 +15,10 @@ find_package(GTest REQUIRED)
 include_directories(${GTEST_INCLUDE_DIRS})
 
 # 添加头文件路径
-include_directories(include)
-include_directories(third_party)  # 添加stb_image的路径
+include_directories(
+    ${CMAKE_SOURCE_DIR}/include   # 项目头文件目录
+    ${CMAKE_SOURCE_DIR}/third_party
+)
 
 # 收集源文件
 file(GLOB_RECURSE SOURCES "src/*.cpp")

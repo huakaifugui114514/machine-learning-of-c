@@ -1,23 +1,25 @@
-#include <iostream>
+// sgd.cpp
 #include "optimizer/sgd.hpp"
 #include <stdexcept>
 
 namespace dlt {
 namespace optimizer {
 
-SGD::SGD(float lr, float momentum) : lr_(lr), momentum_(momentum) {
+SGD::SGD(float lr, float momentum, float clip_value) 
+    : lr_(lr), momentum_(momentum), clip_value_(clip_value) {
     if (lr <= 0) {
         throw std::invalid_argument("Learning rate must be positive.");
     }
     if (momentum < 0 || momentum > 1) {
         throw std::invalid_argument("Momentum must be in the range [0, 1].");
     }
+    if (clip_value <= 0) {
+        throw std::invalid_argument("Gradient clip value must be positive.");
+    }
 }
 
-void SGD::add_parameters(const std::vector<TensorPtr>& params) {
+void SGD::add_parameters(const std::vector<std::shared_ptr<Tensor>>& params) {
     for (const auto& param : params) {
-        std::cout << "sgd params:" << std::endl;
-        param->print();
         if (!param) {
             throw std::invalid_argument("Parameter tensor cannot be null.");
         }
@@ -37,14 +39,13 @@ void SGD::step() {
         const auto& grad = param->grad();
         auto& data = param->data();
 
-        // 添加梯度裁剪，防止爆炸
+        // 梯度裁剪
         std::vector<float> clipped_grad(grad.size());
-        float max_grad = 1.0f;  // 梯度裁剪阈值
         for (size_t j = 0; j < grad.size(); ++j) {
-            clipped_grad[j] = std::max(-max_grad, std::min(grad[j], max_grad));
+            clipped_grad[j] = std::max(-clip_value_, std::min(grad[j], clip_value_));
         }
 
-        // 使用裁剪后的梯度
+        // 更新参数
         if (momentum_ > 0) {
             auto& velocity = velocities_[i];
             for (size_t j = 0; j < data.size(); ++j) {

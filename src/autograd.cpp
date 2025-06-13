@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <numeric>
 #include <limits>
+# include <sstream>
+#include <cfloat>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -14,78 +16,177 @@
 
 namespace dlt {
 
-// 辅助工具
-inline size_t tensor_index(const std::vector<int>& shape, int b, int c, int h, int w) {
-    return ((b * shape[1] + c) * shape[2] + h) * shape[3] + w;
-}
+// 内置函数
 
-// 通用索引计算优化
-inline size_t compute_index(const std::vector<int>& shape, const std::vector<int>& indices) {
-    size_t index = 0;
-    size_t stride = 1;
-    for (int i = shape.size() - 1; i >= 0; --i) {
-        index += indices[i] * stride;
-        stride *= shape[i];
+/**
+ * 计算两个形状的广播结果形状
+ * 
+ * @param shape_a 第一个张量的形状
+ * @param shape_b 第二个张量的形状
+ * @return 广播后的形状
+ * @throws std::invalid_argument 如果形状不兼容
+ */
+inline std::vector<int> broadcast_shapes(const std::vector<int>& shape_a, const std::vector<int>& shape_b) {
+    size_t max_dims = std::max(shape_a.size(), shape_b.size());
+    std::vector<int> result(max_dims);
+    
+    for (int i = max_dims - 1, j = shape_a.size() - 1, k = shape_b.size() - 1; i >= 0; --i, --j, --k) {
+        int dim_a = j >= 0 ? shape_a[j] : 1;
+        int dim_b = k >= 0 ? shape_b[k] : 1;
+        
+        if (dim_a != dim_b && dim_a != 1 && dim_b != 1) {
+            throw std::invalid_argument("Shapes are not broadcast-compatible");
+        }
+        
+        result[i] = std::max(dim_a, dim_b);
     }
-    return index;
+    return result;
 }
 
-// 优化后的张量索引计算
-inline size_t optimized_tensor_index(const std::vector<int>& shape, 
-                                    int b, int c, int h, int w) {
-    // 假设形状为 [B, C, H, W]
-    return (b * shape[1] * shape[2] * shape[3]) + 
-           (c * shape[2] * shape[3]) + 
-           (h * shape[3]) + 
-           w;
+// 添加广播计算函数
+/**
+ * 执行广播计算
+ * 
+ * @param a 第一个输入张量
+ * @param b 第二个输入张量
+ * @param result 输出结果数据
+ * @param out_shape 广播后的形状
+ * @param op 元素级操作函数
+ */
+inline void broadcast_compute(
+    const TensorPtr& a, 
+    const TensorPtr& b, 
+    std::vector<float>& result,
+    const std::vector<int>& out_shape,
+    std::function<float(float, float)> op
+) {
+    const auto& a_shape = a->shape();
+    const auto& b_shape = b->shape();
+    const auto& a_data = a->data();
+    const auto& b_data = b->data();
+    
+    // 计算每个张量的步长(考虑广播)
+    std::vector<int> a_strides(out_shape.size(), 0);
+    std::vector<int> b_strides(out_shape.size(), 0);
+    
+    int a_stride = 1;
+    int b_stride = 1;
+    for (int i = out_shape.size() - 1, j = a_shape.size() - 1, k = b_shape.size() - 1; i >= 0; --i, --j, --k) {
+        a_strides[i] = (j >= 0 && a_shape[j] > 1) ? a_stride : 0;
+        b_strides[i] = (k >= 0 && b_shape[k] > 1) ? b_stride : 0;
+        
+        a_stride *= (j >= 0) ? a_shape[j] : 1;
+        b_stride *= (k >= 0) ? b_shape[k] : 1;
+    }
+    
+    // 计算输出大小
+    size_t total_size = 1;
+    for (int dim : out_shape) {
+        total_size *= dim;
+    }
+    
+    // 执行广播计算
+    result.resize(total_size);
+    
+    #pragma omp parallel for
+    for (size_t index = 0; index < total_size; ++index) {
+        size_t a_index = 0;
+        size_t b_index = 0;
+        size_t remainder = index;
+        
+        for (int i = 0; i < out_shape.size(); ++i) {
+            int dim_size = out_shape[i];
+            int pos = remainder % dim_size;
+            remainder /= dim_size;
+            
+            a_index += a_strides[i] * pos;
+            b_index += b_strides[i] * pos;
+        }
+        
+        result[index] = op(a_data[a_index], b_data[b_index]);
+    }
 }
 
-// 宏定义修复：使用_Pragma代替#pragma，并添加括号保护
-#define VECTORIZED_LOOP(operation) \
-    const auto& in_data = inputs[0]->data(); \
-    std::vector<float> result_data(in_data.size()); \
-    const size_t size = in_data.size(); \
-    _Pragma("omp parallel for simd") \
-    for (size_t i = 0; i < size; ++i) { \
-        result_data[i] = (operation); \
-    } \
-    bool requires_grad = inputs[0]->requires_grad(); \
-    auto output = std::make_shared<Tensor>( \
-        std::move(result_data), \
-        std::vector<int>(inputs[0]->shape()), \
-        requires_grad \
-    ); \
-    if (requires_grad) { \
-        output->grad_fn_ = shared_from_this(); \
-        output->children_ = inputs; \
-        output->is_leaf_ = false; \
-    } \
-    return output;
-
+/**
+ * 减少梯度到目标形状（用于广播操作的反向传播）
+ * 
+ * @param grad_output 上游梯度张量（广播后的形状）
+ * @param target_shape 需要减少到的目标形状
+ * @return 缩减后的梯度张量
+ */
+inline TensorPtr reduce_grad(const TensorPtr& grad_output, const std::vector<int>& target_shape) {
+    // 确保张量是连续的
+    auto cont_grad = dlt::ops::contiguous(grad_output);
+    
+    // 计算目标形状的总元素数
+    int target_size = 1;
+    for (int dim : target_shape) {
+        if (dim <= 0) {
+            throw std::invalid_argument("Shape dimensions must be positive");
+        }
+        target_size *= dim;
+    }
+    
+    // 检查元素数量是否匹配
+    if (cont_grad->size() != target_size) {
+        // 尝试通过求和减少维度
+        auto reduced_grad = cont_grad;
+        int reduce_dim = -1;
+        for (size_t i = 0; i < target_shape.size(); ++i) {
+            if (reduced_grad->shape()[i] != target_shape[i]) {
+                reduce_dim = i;
+                break;
+            }
+        }
+        
+        if (reduce_dim != -1) {
+            reduced_grad = dlt::ops::sum(reduced_grad, reduce_dim, true);
+        }
+        
+        // 再次检查
+        if (reduced_grad->size() != target_size) {
+            std::ostringstream oss;
+            oss << "Cannot reduce gradient from shape [";
+            for (int dim : cont_grad->shape()) oss << dim << ", ";
+            oss << "] to shape [";
+            for (int dim : target_shape) oss << dim << ", ";
+            oss << "]";
+            throw std::runtime_error(oss.str());
+        }
+        cont_grad = reduced_grad;
+    }
+    
+    // 重塑为目标形状
+    return dlt::ops::reshape(cont_grad, target_shape);
+}
 
 // AddFunction实现
+/**
+ * 执行张量加法操作（支持广播）
+ * 
+ * @param inputs 输入张量列表（必须包含两个张量）
+ * @return 加法结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
         throw std::invalid_argument("AddFunction requires exactly two inputs");
     }
     
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    const auto& b_data = inputs[1]->data();
-    const size_t size = a_data.size();
+    auto& a = inputs[0];
+    auto& b = inputs[1];
     
-    std::vector<float> result_data(size);
-    _Pragma("omp parallel for")
-    for (size_t i = 0; i < size; ++i) {
-        result_data[i] = a_data[i] + b_data[i];
-    }
+    // 计算广播形状
+    auto out_shape = broadcast_shapes(a->shape(), b->shape());
     
-    bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
-    output_ = std::make_shared<Tensor>(
-        std::move(result_data), 
-        std::vector<int>(inputs[0]->shape()), 
-        requires_grad
+    std::vector<float> result;
+    broadcast_compute(a, b, result, out_shape, 
+        [](float a_val, float b_val) { return a_val + b_val; }
     );
+    
+    bool requires_grad = a->requires_grad() || b->requires_grad();
+    output_ = std::make_shared<Tensor>(result, out_shape, requires_grad);
     
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
@@ -96,6 +197,12 @@ TensorPtr AddFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算加法操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> AddFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
     
@@ -113,32 +220,32 @@ std::vector<TensorPtr> AddFunction::backward(const TensorPtr& grad_output) {
 }
 
 // SubFunction实现
+/**
+ * 执行张量减法操作（支持广播）
+ * 
+ * @param inputs 输入张量列表（必须包含两个张量）
+ * @return 减法结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr SubFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
         throw std::invalid_argument("SubtractFunction requires exactly two inputs");
     }
     inputs_ = inputs;
+    auto& a = inputs[0];
+    auto& b = inputs[1];
     
-    // 获取输入张量数据
-    const auto& a_data = inputs[0]->data();
-    const auto& b_data = inputs[1]->data();
+    // 计算广播形状
+    auto out_shape = broadcast_shapes(a->shape(), b->shape());
     
-    // 检查形状是否匹配
-    if (a_data.size() != b_data.size()) {
-        throw std::invalid_argument("Tensor sizes must match for subtraction");
-    }
+    std::vector<float> result;
+    broadcast_compute(a, b, result, out_shape, 
+        [](float a_val, float b_val) { return a_val - b_val; }
+    );
     
-    // 执行减法操作
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = a_data[i] - b_data[i];
-    }
+    bool requires_grad = a->requires_grad() || b->requires_grad();
+    output_ = std::make_shared<Tensor>(result, out_shape, requires_grad);
     
-    // 创建输出张量
-    bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
-    
-    // 设置梯度函数和子节点信息
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -148,50 +255,63 @@ TensorPtr SubFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算减法操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> SubFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
     
-    // 计算梯度: dL/dx = dL/dy * dy/dx = dL/dy * 1
+    // dL/dx = dL/dy * dy/dx = dL/dy * 1
     if (inputs_[0]->requires_grad()) {
-        grads[0] = grad_output;  // 对应 a - b 中的 a，梯度为 +grad_output
+        grads[0] = reduce_grad(grad_output, inputs_[0]->shape());
     }
     
-    // 计算梯度: dL/dy = dL/dy * dy/db = dL/dy * (-1)
+    // dL/dy = dL/dy * dy/dy = dL/dy * (-1)
     if (inputs_[1]->requires_grad()) {
-        // 创建一个新的张量，元素为 -1.0 * grad_output
-        std::vector<float> neg_grad_data(grad_output->data().size());
+        // 创建一个负梯度张量
+        std::vector<float> neg_grad_data(grad_output->size());
         const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_output_data.size(); ++i) {
+        for (size_t i = 0; i < neg_grad_data.size(); ++i) {
             neg_grad_data[i] = -grad_output_data[i];
         }
-        grads[1] = std::make_shared<Tensor>(neg_grad_data, grad_output->shape(), false);
+        auto neg_grad = std::make_shared<Tensor>(neg_grad_data, grad_output->shape(), false);
+        grads[1] = reduce_grad(neg_grad, inputs_[1]->shape());
     }
     
     return grads;
 }
 
 // MulFunction实现
+/**
+ * 执行张量乘法操作（支持广播）
+ * 
+ * @param inputs 输入张量列表（必须包含两个张量）
+ * @return 乘法结果张极
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr MulFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
         throw std::invalid_argument("MulFunction requires exactly two inputs");
     }
     
     inputs_ = inputs;
+    auto& a = inputs[0];
+    auto& b = inputs[1];
     
-    // 执行乘法操作
-    const auto& a_data = inputs[0]->data();
-    const auto& b_data = inputs[1]->data();
+    // 计算广播形状
+    auto out_shape = broadcast_shapes(a->shape(), b->shape());
     
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = a_data[i] * b_data[i];
-    }
+    std::vector<float> result;
+    broadcast_compute(a, b, result, out_shape, 
+        [](float a_val, float b_val) { return a_val * b_val; }
+    );
     
-    // 创建输出张量
-    bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    bool requires_grad = a->requires_grad() || b->requires_grad();
+    output_ = std::make_shared<Tensor>(result, out_shape, requires_grad);
     
-    // 如果需要梯度，设置梯度函数
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -201,41 +321,40 @@ TensorPtr MulFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算乘法操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> MulFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
     
-    // dL/dx = dL/dy * dy/dx = dL/dy * y
+    // dL/dx = dL/dy * y
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
-        const auto& b_data = inputs_[1]->data();
-        const auto& grad_output_data = grad_output->data();
-        
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * b_data[i];
-        }
-        
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+        // 计算 grad_output * b
+        auto tmp_grad = ops::mul(grad_output, inputs_[1]);
+        grads[0] = reduce_grad(tmp_grad, inputs_[0]->shape());
     }
     
-    // dL/dy = dL/dy * dy/dy = dL/dy * x
+    // dL/dy = dL/dy * x
     if (inputs_[1]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[1]->size());
-        const auto& a_data = inputs_[0]->data();
-        const auto& b_data = inputs_[1]->data();
-        const auto& grad_output_data = grad_output->data();
-        
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * a_data[i];
-        }
-        
-        grads[1] = std::make_shared<Tensor>(grad_data, inputs_[1]->shape(), false);
+        // 计算 grad_output * a
+        auto tmp_grad = ops::mul(grad_output, inputs_[0]);
+        grads[1] = reduce_grad(tmp_grad, inputs_[1]->shape());
     }
     
     return grads;
 }
 
-// MatMulFunction实现
+// MatMulFunction实现（支持广播）
+/**
+ * 执行矩阵乘法操作（支持广播）
+ * 
+ * @param inputs 输入张量列表（必须包含两个张量）
+ * @return 矩阵乘法结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr MatMulFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
         throw std::invalid_argument("MatMulFunction requires exactly two inputs");
@@ -247,29 +366,110 @@ TensorPtr MatMulFunction::apply(const std::vector<TensorPtr>& inputs) {
     
     const auto& a_shape = a->shape();
     const auto& b_shape = b->shape();
-    const int m = a_shape[0];
-    const int k = a_shape[1];
-    const int n = b_shape[1];
     
-    std::vector<float> result_data(m * n, 0.0f);
+    // 检查维度
+    if (a_shape.size() < 2 || b_shape.size() < 2) {
+        throw std::invalid_argument("Matrices must be at least 2-dimensional");
+    }
+    
+    // 获取矩阵维度
+    int m = a_shape[a_shape.size()-2];
+    int k = a_shape[a_shape.size()-1];
+    int n = b_shape[b_shape.size()-1];
+    
+    // 检查矩阵维度
+    if (k != b_shape[b_shape.size()-2]) {
+        std::ostringstream oss;
+        oss << "Matrix dimensions incompatible: " 
+            << "(" << m << "x" << k << ") vs (" 
+            << b_shape[b_shape.size()-2] << "x" << n << ")";
+        throw std::invalid_argument(oss.str());
+    }
+    
+    // 计算广播形状
+    std::vector<int> a_prefix_shape(a_shape.begin(), a_shape.end()-2);
+    std::vector<int> b_prefix_shape(b_shape.begin(), b_shape.end()-2);
+    std::vector<int> common_prefix = broadcast_shapes(a_prefix_shape, b_prefix_shape);
+    
+    // 计算输出形状
+    std::vector<int> out_shape = common_prefix;
+    out_shape.push_back(m);
+    out_shape.push_back(n);
+    
+    // 计算元素总数
+    size_t total_elements = 1;
+    for (int dim : out_shape) {
+        total_elements *= dim;
+    }
+    
+    // 准备输出数据
+    std::vector<float> result_data(total_elements, 0.0f);
     const float* a_data = a->data_ptr();
     const float* b_data = b->data_ptr();
     
-    _Pragma("omp parallel for collapse(2)")
-    for (int i = 0; i < m; ++i) {
-        for (int j = 0; j < n; ++j) {
-            float sum = 0.0f;
-            for (int kk = 0; kk < k; ++kk) {
-                sum += a_data[i * k + kk] * b_data[kk * n + j];
+    // 计算步长
+    size_t a_matrix_size = m * k;
+    size_t b_matrix_size = b_shape[b_shape.size()-2] * n;
+    size_t out_matrix_size = m * n;
+    
+    // 计算广播维度
+    std::vector<int> a_strides(common_prefix.size(), 0);
+    std::vector<int> b_strides(common_prefix.size(), 0);
+    
+    // 计算每个输入在广播维度上的步长
+    int a_stride = 1;
+    int b_stride = 1;
+    for (int i = common_prefix.size() - 1; i >= 0; --i) {
+        a_strides[i] = (i >= (int)common_prefix.size() - (int)a_prefix_shape.size() && 
+                       a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] > 1) ? a_stride : 0;
+        b_strides[i] = (i >= (int)common_prefix.size() - (int)b_prefix_shape.size() && 
+                       b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] > 1) ? b_stride : 0;
+        
+        a_stride *= (i >= (int)common_prefix.size() - (int)a_prefix_shape.size()) ? 
+                   a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] : 1;
+        b_stride *= (i >= (int)common_prefix.size() - (int)b_prefix_shape.size()) ? 
+                   b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] : 1;
+    }
+    
+    // 计算每个广播索引的矩阵乘法
+    #pragma omp parallel for
+    for (size_t prefix_idx = 0; prefix_idx < total_elements / out_matrix_size; ++prefix_idx) {
+        // 计算广播索引
+        std::vector<int> indices(common_prefix.size());
+        size_t temp = prefix_idx;
+        for (int i = common_prefix.size() - 1; i >= 0; --i) {
+            indices[i] = temp % common_prefix[i];
+            temp /= common_prefix[i];
+        }
+        
+        // 计算输入矩阵的偏移量
+        size_t a_offset = 0;
+        size_t b_offset = 0;
+        for (size_t i = 0; i < indices.size(); ++i) {
+            a_offset += a_strides[i] * indices[i];
+            b_offset += b_strides[i] * indices[i];
+        }
+        
+        // 执行矩阵乘法
+        const float* a_matrix = a_data + a_offset * a_matrix_size;
+        const float* b_matrix = b_data + b_offset * b_matrix_size;
+        float* out_matrix = result_data.data() + prefix_idx * out_matrix_size;
+        
+        for (int i = 0; i < m; ++i) {
+            for (int j = 0; j < n; ++j) {
+                float sum = 0.0f;
+                for (int kk = 0; kk < k; ++kk) {
+                    sum += a_matrix[i * k + kk] * b_matrix[kk * n + j];
+                }
+                out_matrix[i * n + j] = sum;
             }
-            result_data[i * n + j] = sum;
         }
     }
     
     bool requires_grad = a->requires_grad() || b->requires_grad();
     output_ = std::make_shared<Tensor>(
         std::move(result_data), 
-        std::vector<int>{m, n}, 
+        out_shape,
         requires_grad
     );
     
@@ -282,74 +482,276 @@ TensorPtr MatMulFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算矩阵乘法的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> MatMulFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
-    
     const auto& a = inputs_[0];
     const auto& b = inputs_[1];
     
-    // dL/dA = dL/dY * B^T
+    const auto& grad_output_shape = grad_output->shape();
+    const auto& grad_output_data = grad_output->data_ptr();
+    
+    // 获取矩阵维度
+    int m = a->shape()[a->shape().size()-2];
+    int k = a->shape()[a->shape().size()-1];
+    int n = b->shape()[b->shape().size()-1];
+    
+    // 计算广播形状
+    std::vector<int> a_prefix_shape(a->shape().begin(), a->shape().end()-2);
+    std::vector<int> b_prefix_shape(b->shape().begin(), b->shape().end()-2);
+    std::vector<int> common_prefix = broadcast_shapes(a_prefix_shape, b_prefix_shape);
+    
+    // grad_a = grad_output * b^T
     if (a->requires_grad()) {
-        // 转置b
-        int m = b->shape()[0];
-        int n = b->shape()[1];
-        std::vector<float> b_t_data(m * n);
+        // 计算输出形状
+        std::vector<int> grad_a_shape = common_prefix;
+        grad_a_shape.push_back(m);
+        grad_a_shape.push_back(k);
+        size_t grad_a_size = 1;
+        for (int dim : grad_a_shape) grad_a_size *= dim;
         
-        for (int i = 0; i < m; ++i) {
-            for (int j = 0; j < n; ++j) {
-                b_t_data[j * m + i] = b->data()[i * n + j];
+        std::vector<float> grad_a_data(grad_a_size, 0.0f);
+        
+        // 计算步长
+        size_t b_matrix_size = b->shape()[b->shape().size()-2] * b->shape()[b->shape().size()-1];
+        size_t grad_matrix_size = m * n;
+        size_t grad_a_matrix_size = m * k;
+        
+        // 计算广播维度步长
+        std::vector<int> a_strides(common_prefix.size(), 0);
+        std::vector<int> b_strides(common_prefix.size(), 0);
+        std::vector<int> grad_strides(common_prefix.size(), 0);
+        
+        int a_stride = 1;
+        int b_stride = 1;
+        int grad_stride = 1;
+        for (int i = common_prefix.size() - 1; i >= 0; --i) {
+            a_strides[i] = (i >= (int)common_prefix.size() - (int)a_prefix_shape.size() && 
+                          a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] > 1) ? a_stride : 0;
+            b_strides[i] = (i >= (int)common_prefix.size() - (int)b_prefix_shape.size() && 
+                          b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] > 1) ? b_stride : 0;
+            grad_strides[i] = grad_stride;
+            
+            a_stride *= (i >= (int)common_prefix.size() - (int)a_prefix_shape.size()) ? 
+                      a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] : 1;
+            b_stride *= (i >= (int)common_prefix.size() - (int)b_prefix_shape.size()) ? 
+                      b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] : 1;
+            grad_stride *= common_prefix[i];
+        }
+        
+        // 对每个广播索引
+        #pragma omp parallel for
+        for (size_t prefix_idx = 0; prefix_idx < grad_a_size / grad_a_matrix_size; ++prefix_idx) {
+            // 计算广播索引
+            std::vector<int> indices(common_prefix.size());
+            size_t temp = prefix_idx;
+            for (int i = common_prefix.size() - 1; i >= 0; --i) {
+                indices[i] = temp % common_prefix[i];
+                temp /= common_prefix[i];
+            }
+            
+            // 计算偏移量
+            size_t a_offset = 0;
+            size_t b_offset = 0;
+            size_t grad_offset = 0;
+            for (size_t i = 0; i < indices.size(); ++i) {
+                a_offset += a_strides[i] * indices[i];
+                b_offset += b_strides[i] * indices[i];
+                grad_offset += grad_strides[i] * indices[i];
+            }
+            
+            // 获取矩阵指针
+            const float* grad_matrix = grad_output_data + grad_offset * grad_matrix_size;
+            const float* b_matrix = b->data_ptr() + b_offset * b_matrix_size;
+            float* grad_a_matrix = grad_a_data.data() + prefix_idx * grad_a_matrix_size;
+            
+            // 计算 grad_a = grad_output * b^T
+            for (int i = 0; i < m; ++i) {
+                for (int kk = 0; kk < k; ++kk) {
+                    float sum = 0.0f;
+                    for (int j = 0; j < n; ++j) {
+                        sum += grad_matrix[i * n + j] * b_matrix[kk * n + j];
+                    }
+                    grad_a_matrix[i * k + kk] += sum;
+                }
             }
         }
         
-        auto b_t = std::make_shared<Tensor>(b_t_data, std::vector<int>{n, m}, false);
-        
-        // 计算grad_output和b_t的矩阵乘法
-        grads[0] = ops::matmul(grad_output, b_t);
+        grads[0] = std::make_shared<Tensor>(grad_a_data, grad_a_shape, false);
     }
     
-    // dL/dB = A^T * dL/dY
+    // grad_b = a^T * grad_output
     if (b->requires_grad()) {
-        // 转置a
-        int m = a->shape()[0];
-        int n = a->shape()[1];
-        std::vector<float> a_t_data(m * n);
+        // 计算输出形状
+        std::vector<int> grad_b_shape = common_prefix;
+        grad_b_shape.push_back(b->shape()[b->shape().size()-2]);
+        grad_b_shape.push_back(n);
+        size_t grad_b_size = 1;
+        for (int dim : grad_b_shape) grad_b_size *= dim;
         
-        for (int i = 0; i < m; ++i) {
-            for (int j = 0; j < n; ++j) {
-                a_t_data[j * m + i] = a->data()[i * n + j];
+        std::vector<float> grad_b_data(grad_b_size, 0.0f);
+        
+        // 计算步长
+        size_t a_matrix_size = a->shape()[a->shape().size()-2] * a->shape()[a->shape().size()-1];
+        size_t grad_matrix_size = m * n;
+        size_t grad_b_matrix_size = b->shape()[b->shape().size()-2] * n;
+        
+        // 计算广播维度步长
+        std::vector<int> a_strides(common_prefix.size(), 0);
+        std::vector<int> b_strides(common_prefix.size(), 0);
+        std::vector<int> grad_strides(common_prefix.size(), 0);
+        
+        int a_stride = 1;
+        int b_stride = 1;
+        int grad_stride = 1;
+        for (int i = common_prefix.size() - 1; i >= 0; --i) {
+            a_strides[i] = (i >= (int)common_prefix.size() - (int)a_prefix_shape.size() && 
+                          a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] > 1) ? a_stride : 0;
+            b_strides[i] = (i >= (int)common_prefix.size() - (int)b_prefix_shape.size() && 
+                          b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] > 1) ? b_stride : 0;
+            grad_strides[i] = grad_stride;
+            
+            a_stride *= (i >= (int)common_prefix.size() - (int)a_prefix_shape.size()) ? 
+                      a_prefix_shape[i - (common_prefix.size() - a_prefix_shape.size())] : 1;
+            b_stride *= (i >= (int)common_prefix.size() - (int)b_prefix_shape.size()) ? 
+                      b_prefix_shape[i - (common_prefix.size() - b_prefix_shape.size())] : 1;
+            grad_stride *= common_prefix[i];
+        }
+        
+        // 对每个广播索引
+        #pragma omp parallel for
+        for (size_t prefix_idx = 0; prefix_idx < grad_b_size / grad_b_matrix_size; ++prefix_idx) {
+            // 计算广播索引
+            std::vector<int> indices(common_prefix.size());
+            size_t temp = prefix_idx;
+            for (int i = common_prefix.size() - 1; i >= 0; --i) {
+                indices[i] = temp % common_prefix[i];
+                temp /= common_prefix[i];
+            }
+            
+            // 计算偏移量
+            size_t a_offset = 0;
+            size_t b_offset = 0;
+            size_t grad_offset = 0;
+            for (size_t i = 0; i < indices.size(); ++i) {
+                a_offset += a_strides[i] * indices[i];
+                b_offset += b_strides[i] * indices[i];
+                grad_offset += grad_strides[i] * indices[i];
+            }
+            
+            // 获取矩阵指针
+            const float* grad_matrix = grad_output_data + grad_offset * grad_matrix_size;
+            const float* a_matrix = a->data_ptr() + a_offset * a_matrix_size;
+            float* grad_b_matrix = grad_b_data.data() + prefix_idx * grad_b_matrix_size;
+            
+            // 计算 grad_b = a^T * grad_output
+            for (int kk = 0; kk < k; ++kk) {
+                for (int j = 0; j < n; ++j) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < m; ++i) {
+                        sum += a_matrix[i * k + kk] * grad_matrix[i * n + j];
+                    }
+                    grad_b_matrix[kk * n + j] += sum;
+                }
             }
         }
         
-        auto a_t = std::make_shared<Tensor>(a_t_data, std::vector<int>{n, m}, false);
-        
-        // 计算a_t和grad_output的矩阵乘法
-        grads[1] = ops::matmul(a_t, grad_output);
+        grads[1] = std::make_shared<Tensor>(grad_b_data, grad_b_shape, false);
     }
     
     return grads;
 }
 
-// SumFunction实现
+/**
+ * 执行张量求和操作（支持沿指定维度求和和广播）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 求和结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr SumFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SumFunction requires exactly one input");
     }
     
     inputs_ = inputs;
+    const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
     
-    // 执行求和操作
-    const auto& a_data = inputs[0]->data();
-    
-    float sum = 0.0f;
-    for (float val : a_data) {
-        sum += val;
+    // 处理全局求和（默认行为）
+    if (dim_ < 0) {
+        float sum = 0.0f;
+        const auto& data = input->data();
+        for (float val : data) {
+            sum += val;
+        }
+        
+        bool requires_grad = input->requires_grad();
+        output_ = std::make_shared<Tensor>(std::vector<float>{sum}, std::vector<int>{1}, requires_grad);
+        
+        if (requires_grad) {
+            output_->grad_fn_ = shared_from_this();
+            output_->children_ = inputs;
+            output_->is_leaf_ = false;
+        }
+        
+        return output_;
     }
     
-    // 创建输出张量
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(std::vector<float>{sum}, std::vector<int>{1}, requires_grad);
+    // 检查维度有效性
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = input_shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(input_shape.size())) {
+        throw std::invalid_argument("Invalid dimension for summation");
+    }
     
-    // 如果需要梯度，设置梯度函数
+    // 计算输出形状
+    std::vector<int> output_shape;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        if (i != static_cast<size_t>(actual_dim) || keepdims_) {
+            output_shape.push_back(i == static_cast<size_t>(actual_dim) ? 1 : input_shape[i]);
+        }
+    }
+    
+    // 计算沿维度求和
+    size_t outer_size = 1;
+    for (int i = 0; i < actual_dim; ++i) {
+        outer_size *= input_shape[i];
+    }
+    
+    size_t inner_size = 1;
+    for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+        inner_size *= input_shape[i];
+    }
+    
+    int dim_size = input_shape[actual_dim];
+    size_t total_size = outer_size * inner_size;
+    
+    std::vector<float> result_data(total_size, 0.0f);
+    const float* input_data = input->data_ptr();
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < inner_size; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < dim_size; ++k) {
+                size_t index = (i * dim_size + k) * inner_size + j;
+                sum += input_data[index];
+            }
+            result_data[i * inner_size + j] = sum;
+        }
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, output_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -359,797 +761,1368 @@ TensorPtr SumFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算求和操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> SumFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
     
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size(), grad_output->data()[0]);
+        const auto& input_shape = inputs_[0]->shape();
+        std::vector<float> grad_data(inputs_[0]->size(), 0.0f);
+        
+        // 处理全局求和
+        if (dim_ < 0) {
+            float grad_val = grad_output->data()[0];
+            std::fill(grad_data.begin(), grad_data.end(), grad_val);
+            grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+            return grads;
+        }
+        
+        // 获取实际维度
+        int actual_dim = dim_;
+        if (actual_dim < 0) {
+            actual_dim = input_shape.size() + actual_dim;
+        }
+        
+        // 计算维度参数
+        size_t outer_size = 1;
+        for (int i = 0; i < actual_dim; ++i) {
+            outer_size *= input_shape[i];
+        }
+        
+        size_t inner_size = 1;
+        for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
+        }
+        
+        int dim_size = input_shape[actual_dim];
+        const float* grad_output_data = grad_output->data_ptr();
+        
+        // 创建梯度张量
+        #pragma omp parallel for
+        for (size_t i = 0; i < outer_size; ++i) {
+            for (int k = 0; k < dim_size; ++k) {
+                for (size_t j = 0; j < inner_size; ++j) {
+                    size_t input_index = (i * dim_size + k) * inner_size + j;
+                    size_t grad_index = i * inner_size + j;
+                    grad_data[input_index] = grad_output_data[grad_index];
+                }
+            }
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+    }
+    
+    return grads;
+}
+
+/**
+ * 执行张量指数操作（e^x，逐元素）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 指数计算结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
+TensorPtr ExpFunction::apply(const std::vector<TensorPtr>& inputs) {
+    if (inputs.size() != 1) {
+        throw std::invalid_argument("ExpFunction requires exactly one input");
+    }
+    
+    inputs_ = inputs;
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算指数值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::exp(input_data[i]);
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        input_shape,
+        requires_grad
+    );
+    
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
+}
+
+/**
+ * 计算指数操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
+std::vector<TensorPtr> ExpFunction::backward(const TensorPtr& grad_output) {
+    std::vector<TensorPtr> grads(1);
+    
+    if (inputs_[0]->requires_grad()) {
+        const auto& input_data = inputs_[0]->data();
+        const auto& output_data = output_->data(); // 前向传播的输出
+        const auto& grad_output_data = grad_output->data();
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            // 梯度计算：grad_input = grad_output * exp(input) = grad_output * output
+            grad_data[i] = grad_output_data[i] * output_data[i];
+        }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
     
     return grads;
 }
 
-// ExpFunction实现
-TensorPtr ExpFunction::apply(const std::vector<TensorPtr>& inputs) {
-    if (inputs.size() != 1) {
-        throw std::invalid_argument("ExpFunction requires exactly one input");
-    }
-    inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::exp(a_data[i]);
-    }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    return output_;
-}
-
-std::vector<TensorPtr> ExpFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(1);
-    if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
-        const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * std::exp(a_data[i]);
-        }
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
-    }
-    return grads;
-}
-
-// LogFunction实现
+/**
+ * 执行张量自然对数操作（ln(x)，逐元素）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 对数计算结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或包含非正值
+ */
 TensorPtr LogFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("LogFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::log(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 检查输入值有效性
+    for (float val : input_data) {
+        if (val <= 0) {
+            throw std::invalid_argument("Logarithm input must be positive");
+        }
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    // 计算自然对数
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::log(input_data[i]);
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        input_shape,
+        requires_grad
+    );
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算对数操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> LogFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& input_data = inputs_[0]->data();
         const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] / a_data[i];
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            // 梯度计算：grad_input = grad_output / x
+            grad_data[i] = grad_output_data[i] / input_data[i];
         }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// SinFunction实现
+/**
+ * 执行张量正弦操作（sin(x)，逐元素）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 正弦计算结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr SinFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SinFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::sin(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算正弦值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::sin(input_data[i]);
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        input_shape,
+        requires_grad
+    );
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算正弦操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> SinFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& input_data = inputs_[0]->data();
         const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * std::cos(a_data[i]);
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            // 梯度计算：grad_input = grad_output * cos(x)
+            grad_data[i] = grad_output_data[i] * std::cos(input_data[i]);
         }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// CosFunction实现
+/**
+ * 执行张量余弦操作（cos(x)，逐元素）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 余弦计算结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr CosFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("CosFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::cos(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算余弦值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::cos(input_data[i]);
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        input_shape,
+        requires_grad
+    );
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算余弦操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> CosFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& input_data = inputs_[0]->data();
         const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = -grad_output_data[i] * std::sin(a_data[i]);
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            // 梯度计算：grad_input = grad_output * (-sin(x))
+            grad_data[i] = -grad_output_data[i] * std::sin(input_data[i]);
         }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// TanFunction实现
+/**
+ * 执行张量正切操作（tan(x)，逐元素）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 正切计算结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或包含无效值
+ */
 TensorPtr TanFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("TanFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::tan(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算正切值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < size; ++i) {
+        // 检查输入值是否会导致无限大结果
+        if (std::abs(std::cos(input_data[i])) < 1e-8) {
+            throw std::invalid_argument("Tangent input causes undefined behavior");
+        }
+        result_data[i] = std::tan(input_data[i]);
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(
+        std::move(result_data), 
+        input_shape,
+        requires_grad
+    );
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算正切操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> TanFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& output_data = output_->data(); // 前向传播的输出（tan(x)）
         const auto& grad_output_data = grad_output->data();
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] / (std::cos(a_data[i]) * std::cos(a_data[i]));
+        
+        std::vector<float> grad_data(inputs_[0]->size());
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            // 梯度计算：grad_input = grad_output * (1 + tan²(x))
+            //           = grad_output / cos²(x)
+            float sec_sq = 1 + output_data[i] * output_data[i];
+            grad_data[i] = grad_output_data[i] * sec_sq;
         }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
 // MaxFunction实现
+/**
+ * 执行张量最大值操作（支持全局和沿指定维度）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 最大值结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr MaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MaxFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    float max_val = *std::max_element(a_data.begin(), a_data.end());
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(std::vector<float>{max_val}, std::vector<int>{1}, requires_grad);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 处理全局最大值（默认行为）
+    if (dim_ < 0) {
+        float max_val = *std::max_element(input_data.begin(), input_data.end());
+        bool requires_grad = input->requires_grad();
+        output_ = std::make_shared<Tensor>(std::vector<float>{max_val}, std::vector<int>{1}, requires_grad);
+        
+        if (requires_grad) {
+            // 找到最大值索引
+            auto max_it = std::max_element(input_data.begin(), input_data.end());
+            size_t max_index = std::distance(input_data.begin(), max_it);
+            argmax_indices_ = {max_index};
+            
+            output_->grad_fn_ = shared_from_this();
+            output_->children_ = inputs;
+            output_->is_leaf_ = false;
+        }
+        
+        return output_;
+    }
+    
+    // 检查维度有效性
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = input_shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(input_shape.size())) {
+        throw std::invalid_argument("Invalid dimension for max operation");
+    }
+    
+    // 计算输出形状
+    std::vector<int> output_shape;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        if (i != static_cast<size_t>(actual_dim) || keepdims_) {
+            output_shape.push_back(i == static_cast<size_t>(actual_dim) ? 1 : input_shape[i]);
+        }
+    }
+    
+    // 如果没有维度被保留，确保至少有一个维度
+    if (output_shape.empty()) {
+        output_shape.push_back(1);
+    }
+    
+    // 计算沿维度最大值
+    size_t outer_size = 1;
+    for (int i = 0; i < actual_dim; ++i) {
+        outer_size *= input_shape[i];
+    }
+    
+    size_t inner_size = 1;
+    for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+        inner_size *= input_shape[i];
+    }
+    
+    int dim_size = input_shape[actual_dim];
+    size_t total_size = outer_size * inner_size;
+    
+    std::vector<float> result_data(total_size, std::numeric_limits<float>::lowest());
+    argmax_indices_.resize(total_size);
+    const float* input_ptr = input->data_ptr();
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < inner_size; ++j) {
+            size_t base_index = (i * dim_size) * inner_size + j;
+            float max_val = input_ptr[base_index];
+            size_t max_index = 0;
+            
+            for (int k = 1; k < dim_size; ++k) {
+                size_t index = base_index + k * inner_size;
+                if (input_ptr[index] > max_val) {
+                    max_val = input_ptr[index];
+                    max_index = k;
+                }
+            }
+            
+            result_data[i * inner_size + j] = max_val;
+            argmax_indices_[i * inner_size + j] = (i * dim_size + max_index) * inner_size + j;
+        }
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, output_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算最大值操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> MaxFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
+        const auto& input_shape = inputs_[0]->shape();
         std::vector<float> grad_data(inputs_[0]->size(), 0.0f);
-        const auto& a_data = inputs_[0]->data();
-        const auto& grad_output_data = grad_output->data();
-        auto max_it = std::max_element(a_data.begin(), a_data.end());
-        size_t max_index = std::distance(a_data.begin(), max_it);
-        grad_data[max_index] = grad_output_data[0];
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
+        const float* grad_output_ptr = grad_output->data_ptr();
+        
+        // 处理全局最大值
+        if (dim_ < 0) {
+            grad_data[argmax_indices_[0]] = grad_output_ptr[0];
+            grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+            return grads;
+        }
+        
+        // 获取实际维度
+        int actual_dim = dim_;
+        if (actual_dim < 0) {
+            actual_dim = input_shape.size() + actual_dim;
+        }
+        
+        // 计算维度参数
+        size_t outer_size = 1;
+        for (int i = 0; i < actual_dim; ++i) {
+            outer_size *= input_shape[i];
+        }
+        
+        size_t inner_size = 1;
+        for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
+        }
+        
+        int dim_size = input_shape[actual_dim];
+        size_t total_size = outer_size * inner_size;
+        
+        // 创建梯度张量
+        for (size_t i = 0; i < total_size; ++i) {
+            grad_data[argmax_indices_[i]] = grad_output_ptr[i];
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
+    
     return grads;
 }
 
 // MinFunction实现
+/**
+ * 执行张量最小值操作（支持全局和沿指定维度）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 最小值结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr MinFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MinFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    float min_val = *std::min_element(a_data.begin(), a_data.end());
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(std::vector<float>{min_val}, std::vector<int>{1}, requires_grad);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 处理全局最小值（默认行为）
+    if (dim_ < 0) {
+        float min_val = *std::min_element(input_data.begin(), input_data.end());
+        bool requires_grad = input->requires_grad();
+        output_ = std::make_shared<Tensor>(std::vector<float>{min_val}, std::vector<int>{1}, requires_grad);
+        
+        if (requires_grad) {
+            // 找到最小值索引
+            auto min_it = std::min_element(input_data.begin(), input_data.end());
+            size_t min_index = std::distance(input_data.begin(), min_it);
+            argmin_indices_ = {min_index};
+            
+            output_->grad_fn_ = shared_from_this();
+            output_->children_ = inputs;
+            output_->is_leaf_ = false;
+        }
+        
+        return output_;
+    }
+    
+    // 检查维度有效性
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = input_shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(input_shape.size())) {
+        throw std::invalid_argument("Invalid dimension for min operation");
+    }
+    
+    // 计算输出形状
+    std::vector<int> output_shape;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        if (i != static_cast<size_t>(actual_dim) || keepdims_) {
+            output_shape.push_back(i == static_cast<size_t>(actual_dim) ? 1 : input_shape[i]);
+        }
+    }
+    
+    // 如果没有维度被保留，确保至少有一个维度
+    if (output_shape.empty()) {
+        output_shape.push_back(1);
+    }
+    
+    // 计算沿维度最小值
+    size_t outer_size = 1;
+    for (int i = 0; i < actual_dim; ++i) {
+        outer_size *= input_shape[i];
+    }
+    
+    size_t inner_size = 1;
+    for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+        inner_size *= input_shape[i];
+    }
+    
+    int dim_size = input_shape[actual_dim];
+    size_t total_size = outer_size * inner_size;
+    
+    std::vector<float> result_data(total_size, std::numeric_limits<float>::max());
+    argmin_indices_.resize(total_size);
+    const float* input_ptr = input->data_ptr();
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < inner_size; ++j) {
+            size_t base_index = (i * dim_size) * inner_size + j;
+            float min_val = input_ptr[base_index];
+            size_t min_index = 0;
+            
+            for (int k = 1; k < dim_size; ++k) {
+                size_t index = base_index + k * inner_size;
+                if (input_ptr[index] < min_val) {
+                    min_val = input_ptr[index];
+                    min_index = k;
+                }
+            }
+            
+            result_data[i * inner_size + j] = min_val;
+            argmin_indices_[i * inner_size + j] = (i * dim_size + min_index) * inner_size + j;
+        }
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, output_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算最小值操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> MinFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
+        const auto& input_shape = inputs_[0]->shape();
         std::vector<float> grad_data(inputs_[0]->size(), 0.0f);
-        const auto& a_data = inputs_[0]->data();
-        const auto& grad_output_data = grad_output->data();
-        auto min_it = std::min_element(a_data.begin(), a_data.end());
-        size_t min_index = std::distance(a_data.begin(), min_it);
-        grad_data[min_index] = grad_output_data[0];
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
-    }
-    return grads;
-}
-
-// MaxDimFunction实现
-TensorPtr MaxDimFunction::apply(const std::vector<TensorPtr>& inputs) {
-    if (inputs.size() != 1) {
-        throw std::invalid_argument("MaxDimFunction requires exactly one input");
-    }
-    inputs_ = inputs;
-    const auto& a = inputs[0];
-    if (a->shape().size() != 2) {
-        throw std::invalid_argument("Only 2D tensors are supported for now");
-    }
-    std::vector<float> result;
-    if (dim_ == 0) {
-        for (int j = 0; j < a->shape()[1]; ++j) {
-            float max_val = a->data()[j];
-            for (int i = 1; i < a->shape()[0]; ++i) {
-                max_val = std::max(max_val, a->data()[i * a->shape()[1] + j]);
-            }
-            result.push_back(max_val);
+        const float* grad_output_ptr = grad_output->data_ptr();
+        
+        // 处理全局最小值
+        if (dim_ < 0) {
+            grad_data[argmin_indices_[0]] = grad_output_ptr[0];
+            grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+            return grads;
         }
-    } else if (dim_ == 1) {
-        for (int i = 0; i < a->shape()[0]; ++i) {
-            float max_val = a->data()[i * a->shape()[1]];
-            for (int j = 1; j < a->shape()[1]; ++j) {
-                max_val = std::max(max_val, a->data()[i * a->shape()[1] + j]);
-            }
-            result.push_back(max_val);
+        
+        // 获取实际维度
+        int actual_dim = dim_;
+        if (actual_dim < 0) {
+            actual_dim = input_shape.size() + actual_dim;
         }
-    }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result, std::vector<int>{static_cast<int>(result.size())}, requires_grad);
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    return output_;
-}
-
-std::vector<TensorPtr> MaxDimFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(1);
-    if (inputs_[0]->requires_grad()) {
-        const auto& a = inputs_[0];
-        std::vector<float> grad_data(a->size(), 0.0f);
-        const auto& grad_output_data = grad_output->data();
-        if (dim_ == 0) {
-            for (int j = 0; j < a->shape()[1]; ++j) {
-                float max_val = a->data()[j];
-                int max_index = 0;
-                for (int i = 1; i < a->shape()[0]; ++i) {
-                    if (a->data()[i * a->shape()[1] + j] > max_val) {
-                        max_val = a->data()[i * a->shape()[1] + j];
-                        max_index = i;
-                    }
-                }
-                grad_data[max_index * a->shape()[1] + j] = grad_output_data[j];
-            }
-        } else if (dim_ == 1) {
-            for (int i = 0; i < a->shape()[0]; ++i) {
-                float max_val = a->data()[i * a->shape()[1]];
-                int max_index = 0;
-                for (int j = 1; j < a->shape()[1]; ++j) {
-                    if (a->data()[i * a->shape()[1] + j] > max_val) {
-                        max_val = a->data()[i * a->shape()[1] + j];
-                        max_index = j;
-                    }
-                }
-                grad_data[i * a->shape()[1] + max_index] = grad_output_data[i];
-            }
+        
+        // 计算维度参数
+        size_t outer_size = 1;
+        for (int i = 0; i < actual_dim; ++i) {
+            outer_size *= input_shape[i];
         }
-        grads[0] = std::make_shared<Tensor>(grad_data, a->shape(), false);
-    }
-    return grads;
-}
-
-// MinDimFunction实现
-TensorPtr MinDimFunction::apply(const std::vector<TensorPtr>& inputs) {
-    if (inputs.size() != 1) {
-        throw std::invalid_argument("MinDimFunction requires exactly one input");
-    }
-    inputs_ = inputs;
-    const auto& a = inputs[0];
-    if (a->shape().size() != 2) {
-        throw std::invalid_argument("Only 2D tensors are supported for now");
-    }
-    std::vector<float> result;
-    if (dim_ == 0) {
-        for (int j = 0; j < a->shape()[1]; ++j) {
-            float min_val = a->data()[j];
-            for (int i = 1; i < a->shape()[0]; ++i) {
-                min_val = std::min(min_val, a->data()[i * a->shape()[1] + j]);
-            }
-            result.push_back(min_val);
+        
+        size_t inner_size = 1;
+        for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
         }
-    } else if (dim_ == 1) {
-        for (int i = 0; i < a->shape()[0]; ++i) {
-            float min_val = a->data()[i * a->shape()[1]];
-            for (int j = 1; j < a->shape()[1]; ++j) {
-                min_val = std::min(min_val, a->data()[i * a->shape()[1] + j]);
-            }
-            result.push_back(min_val);
+        
+        int dim_size = input_shape[actual_dim];
+        size_t total_size = outer_size * inner_size;
+        
+        // 创建梯度张量
+        for (size_t i = 0; i < total_size; ++i) {
+            grad_data[argmin_indices_[i]] = grad_output_ptr[i];
         }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result, std::vector<int>{static_cast<int>(result.size())}, requires_grad);
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    return output_;
-}
-
-std::vector<TensorPtr> MinDimFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(1);
-    if (inputs_[0]->requires_grad()) {
-        const auto& a = inputs_[0];
-        std::vector<float> grad_data(a->size(), 0.0f);
-        const auto& grad_output_data = grad_output->data();
-        if (dim_ == 0) {
-            for (int j = 0; j < a->shape()[1]; ++j) {
-                float min_val = a->data()[j];
-                int min_index = 0;
-                for (int i = 1; i < a->shape()[0]; ++i) {
-                    if (a->data()[i * a->shape()[1] + j] < min_val) {
-                        min_val = a->data()[i * a->shape()[1] + j];
-                        min_index = i;
-                    }
-                }
-                grad_data[min_index * a->shape()[1] + j] = grad_output_data[j];
-            }
-        } else if (dim_ == 1) {
-            for (int i = 0; i < a->shape()[0]; ++i) {
-                float min_val = a->data()[i * a->shape()[1]];
-                int min_index = 0;
-                for (int j = 1; j < a->shape()[1]; ++j) {
-                    if (a->data()[i * a->shape()[1] + j] < min_val) {
-                        min_val = a->data()[i * a->shape()[1] + j];
-                        min_index = j;
-                    }
-                }
-                grad_data[i * a->shape()[1] + min_index] = grad_output_data[i];
-            }
-        }
-        grads[0] = std::make_shared<Tensor>(grad_data, a->shape(), false);
-    }
+    
     return grads;
 }
 
 // MeanFunction实现
+/**
+ * 执行张量均值操作（支持全局和沿指定维度）
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 均值结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr MeanFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MeanFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    float sum = std::accumulate(a_data.begin(), a_data.end(), 0.0f);
-    float mean_val = sum / a_data.size();
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(std::vector<float>{mean_val}, std::vector<int>{1}, requires_grad);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 处理全局均值（默认行为）
+    if (dim_ < 0) {
+        float sum = 0.0f;
+        for (float val : input_data) {
+            sum += val;
+        }
+        float mean_val = sum / input_data.size();
+        bool requires_grad = input->requires_grad();
+        output_ = std::make_shared<Tensor>(std::vector<float>{mean_val}, std::vector<int>{1}, requires_grad);
+        
+        if (requires_grad) {
+            output_->grad_fn_ = shared_from_this();
+            output_->children_ = inputs;
+            output_->is_leaf_ = false;
+        }
+        return output_;
+    }
+    
+    // 检查维度有效性
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = input_shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(input_shape.size())) {
+        throw std::invalid_argument("Invalid dimension for mean operation");
+    }
+    
+    // 计算输出形状
+    std::vector<int> output_shape;
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+        if (i != static_cast<size_t>(actual_dim) || keepdims_) {
+            output_shape.push_back(i == static_cast<size_t>(actual_dim) ? 1 : input_shape[i]);
+        }
+    }
+    
+    // 如果没有维度被保留，确保至少有一个维度
+    if (output_shape.empty()) {
+        output_shape.push_back(1);
+    }
+    
+    // 计算沿维度均值
+    size_t outer_size = 1;
+    for (int i = 0; i < actual_dim; ++i) {
+        outer_size *= input_shape[i];
+    }
+    
+    size_t inner_size = 1;
+    for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+        inner_size *= input_shape[i];
+    }
+    
+    int dim_size = input_shape[actual_dim];
+    size_t total_size = outer_size * inner_size;
+    
+    std::vector<float> result_data(total_size, 0.0f);
+    const float* input_ptr = input->data_ptr();
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < inner_size; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < dim_size; ++k) {
+                size_t index = (i * dim_size + k) * inner_size + j;
+                sum += input_ptr[index];
+            }
+            result_data[i * inner_size + j] = sum / dim_size;
+        }
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, output_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算均值操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> MeanFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& grad_output_data = grad_output->data();
-        float grad_val = grad_output_data[0] / inputs_[0]->size();
-        std::fill(grad_data.begin(), grad_data.end(), grad_val);
-        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
-    }
-    return grads;
-}
-
-// MeanDimFunction实现
-TensorPtr MeanDimFunction::apply(const std::vector<TensorPtr>& inputs) {
-    if (inputs.size() != 1) {
-        throw std::invalid_argument("MeanDimFunction requires exactly one input");
-    }
-    inputs_ = inputs;
-    const auto& a = inputs[0];
-    if (a->shape().size() != 2) {
-        throw std::invalid_argument("Only 2D tensors are supported for now");
-    }
-    std::vector<float> result;
-    if (dim_ == 0) {
-        for (int j = 0; j < a->shape()[1]; ++j) {
-            float sum = 0.0f;
-            for (int i = 0; i < a->shape()[0]; ++i) {
-                sum += a->data()[i * a->shape()[1] + j];
-            }
-            result.push_back(sum / a->shape()[0]);
+        const auto& input_shape = inputs_[0]->shape();
+        std::vector<float> grad_data(inputs_[0]->size(), 0.0f);
+        
+        // 处理全局均值
+        if (dim_ < 0) {
+            float grad_val = grad_output->data()[0] / inputs_[0]->size();
+            std::fill(grad_data.begin(), grad_data.end(), grad_val);
+            grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+            return grads;
         }
-    } else if (dim_ == 1) {
-        for (int i = 0; i < a->shape()[0]; ++i) {
-            float sum = 0.0f;
-            for (int j = 0; j < a->shape()[1]; ++j) {
-                sum += a->data()[i * a->shape()[1] + j];
-            }
-            result.push_back(sum / a->shape()[1]);
+        
+        // 获取实际维度
+        int actual_dim = dim_;
+        if (actual_dim < 0) {
+            actual_dim = input_shape.size() + actual_dim;
         }
-    }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result, std::vector<int>{static_cast<int>(result.size())}, requires_grad);
-    if (requires_grad) {
-        output_->grad_fn_ = shared_from_this();
-        output_->children_ = inputs;
-        output_->is_leaf_ = false;
-    }
-    return output_;
-}
-
-std::vector<TensorPtr> MeanDimFunction::backward(const TensorPtr& grad_output) {
-    std::vector<TensorPtr> grads(1);
-    if (inputs_[0]->requires_grad()) {
-        const auto& a = inputs_[0];
-        std::vector<float> grad_data(a->size());
-        const auto& grad_output_data = grad_output->data();
-        if (dim_ == 0) {
-            for (int j = 0; j < a->shape()[1]; ++j) {
-                float grad_val = grad_output_data[j] / a->shape()[0];
-                for (int i = 0; i < a->shape()[0]; ++i) {
-                    grad_data[i * a->shape()[1] + j] = grad_val;
-                }
-            }
-        } else if (dim_ == 1) {
-            for (int i = 0; i < a->shape()[0]; ++i) {
-                float grad_val = grad_output_data[i] / a->shape()[1];
-                for (int j = 0; j < a->shape()[1]; ++j) {
-                    grad_data[i * a->shape()[1] + j] = grad_val;
+        
+        // 计算维度参数
+        size_t outer_size = 1;
+        for (int i = 0; i < actual_dim; ++i) {
+            outer_size *= input_shape[i];
+        }
+        
+        size_t inner_size = 1;
+        for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
+        }
+        
+        int dim_size = input_shape[actual_dim];
+        const float* grad_output_data = grad_output->data_ptr();
+        
+        // 创建梯度张量
+        #pragma omp parallel for
+        for (size_t i = 0; i < outer_size; ++i) {
+            for (int k = 0; k < dim_size; ++k) {
+                for (size_t j = 0; j < inner_size; ++j) {
+                    size_t input_index = (i * dim_size + k) * inner_size + j;
+                    size_t grad_index = i * inner_size + j;
+                    grad_data[input_index] = grad_output_data[grad_index] / dim_size;
                 }
             }
         }
-        grads[0] = std::make_shared<Tensor>(grad_data, a->shape(), false);
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
+    
     return grads;
 }
 
 // ReshapeFunction实现
+/**
+ * 执行张量形状变换操作
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 形状变换后的张量
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr ReshapeFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("ReshapeFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    int new_size = 1;
+    const auto& input = inputs[0];
+    
+    // 检查新形状的元素总数是否匹配
+    size_t new_size = 1;
     for (int dim : new_shape_) {
         new_size *= dim;
     }
-    if (new_size != inputs[0]->size()) {
-        throw std::invalid_argument("New shape does not match the size of the tensor");
+    if (new_size != input->size()) {
+        throw std::invalid_argument("Reshape size does not match the number of elements");
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(inputs[0]->data(), new_shape_, requires_grad);
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(input->data(), new_shape_, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算形状变换操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> ReshapeFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        grads[0] = std::make_shared<Tensor>(grad_output->data(), inputs_[0]->shape(), false);
+        // 梯度直接变换回输入张量的形状
+        const auto& input_shape = inputs_[0]->shape();
+        auto grad_input = std::make_shared<Tensor>(grad_output->data(), input_shape, false);
+        grads[0] = grad_input;
     }
+    
     return grads;
 }
 
-// TransposeFunction实现
+/**
+ * 执行张量转置操作
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 转置后的张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr TransposeFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("TransposeFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a = inputs[0];
-    if (a->shape().size() != 2 || dim0_ < 0 || dim0_ > 1 || dim1_ < 0 || dim1_ > 1) {
-        throw std::invalid_argument("Only 2D tensors are supported for transpose");
+    const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
+    const size_t ndim = input_shape.size();
+    
+    // 验证维度
+    if (dim0_ < 0) dim0_ = ndim + dim0_;
+    if (dim1_ < 0) dim1_ = ndim + dim1_;
+    if (dim0_ < 0 || dim0_ >= static_cast<int>(ndim) || 
+        dim1_ < 0 || dim1_ >= static_cast<int>(ndim)) {
+        throw std::invalid_argument("Invalid dimensions for transpose");
     }
-    std::vector<float> result_data(a->size());
-    const auto& data = a->data();
-    if (dim0_ == 0 && dim1_ == 1) {
-        for (int i = 0; i < a->shape()[0]; ++i) {
-            for (int j = 0; j < a->shape()[1]; ++j) {
-                result_data[j * a->shape()[0] + i] = data[i * a->shape()[1] + j];
-            }
-        }
-    }
-    std::vector<int> new_shape = a->shape();
+    
+    // 计算新形状
+    std::vector<int> new_shape = input_shape;
     std::swap(new_shape[dim0_], new_shape[dim1_]);
-    bool requires_grad = inputs[0]->requires_grad();
+    
+    // 计算转置后的数据
+    const auto& input_data = input->data();
+    std::vector<float> result_data(input_data.size());
+    
+    // 计算转置索引
+    std::vector<size_t> strides(ndim, 1);
+    for (int i = ndim - 2; i >= 0; --i) {
+        strides[i] = strides[i + 1] * new_shape[i + 1];
+    }
+    
+    std::vector<int> indices(ndim, 0);
+    
+    #pragma omp parallel for
+    for (size_t i = 0; i < input_data.size(); ++i) {
+        // 计算原始索引
+        size_t remainder = i;
+        for (int j = ndim - 1; j >= 0; --j) {
+            indices[j] = remainder % input_shape[j];
+            remainder /= input_shape[j];
+        }
+        
+        // 交换维度
+        std::swap(indices[dim0_], indices[dim1_]);
+        
+        // 计算新索引
+        size_t new_index = 0;
+        for (size_t j = 0; j < ndim; ++j) {
+            new_index += indices[j] * strides[j];
+        }
+        
+        result_data[new_index] = input_data[i];
+    }
+    
+    bool requires_grad = input->requires_grad();
     output_ = std::make_shared<Tensor>(result_data, new_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算转置操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> TransposeFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        const auto& a = inputs_[0];
-        std::vector<float> grad_data(a->size());
-        const auto& grad_output_data = grad_output->data();
-        if (dim0_ == 0 && dim1_ == 1) {
-            for (int i = 0; i < a->shape()[0]; ++i) {
-                for (int j = 0; j < a->shape()[1]; ++j) {
-                    grad_data[i * a->shape()[1] + j] = grad_output_data[j * a->shape()[0] + i];
-                }
-            }
-        }
-        grads[0] = std::make_shared<Tensor>(grad_data, a->shape(), false);
+        // 反向转置操作
+        auto grad_input = ops::transpose(grad_output, dim0_, dim1_);
+        grads[0] = grad_input;
     }
+    
     return grads;
 }
 
-// ConcatFunction实现
+/**
+ * 执行张量连接操作
+ * 
+ * @param inputs 输入张量列表（至少包含一个张量）
+ * @return 连接后的张量
+ * @throws std::invalid_argument 如果输入为空或形状不兼容
+ */
 TensorPtr ConcatFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.empty()) {
-        throw std::invalid_argument("No tensors to concatenate");
+        throw std::invalid_argument("ConcatFunction requires at least one input");
     }
+    
     inputs_ = inputs;
-    std::vector<int> output_shape = inputs[0]->shape();
-    int total_size = 0;
-    for (const auto& tensor : inputs) {
-        if (tensor->shape().size() != output_shape.size()) {
-            throw std::invalid_argument("Tensors must have the same number of dimensions");
+    const auto& first_shape = inputs[0]->shape();
+    const size_t ndim = first_shape.size();
+    
+    // 验证所有输入张量的维度数相同
+    for (const auto& input : inputs) {
+        if (input->shape().size() != ndim) {
+            throw std::invalid_argument("All tensors must have the same number of dimensions");
         }
-        for (size_t i = 0; i < output_shape.size(); ++i) {
-            if (i != static_cast<size_t>(dim_)) {
-                if (tensor->shape()[i] != output_shape[i]) {
-                    throw std::invalid_argument("Tensors must have the same shape except for the concatenation dimension");
-                }
-            }
-        }
-        total_size += tensor->shape()[dim_];
     }
-    output_shape[dim_] = total_size;
+    
+    // 计算输出形状
+    std::vector<int> output_shape = first_shape;
+    int total_dim = 0;
+    for (const auto& input : inputs) {
+        total_dim += input->shape()[dim_];
+    }
+    output_shape[dim_] = total_dim;
+    
+    // 收集所有数据
     std::vector<float> result_data;
-    for (const auto& tensor : inputs) {
-        result_data.insert(result_data.end(), tensor->data().begin(), tensor->data().end());
+    for (const auto& input : inputs) {
+        const auto& data = input->data();
+        result_data.insert(result_data.end(), data.begin(), data.end());
     }
+    
+    // 检查是否需要梯度
     bool requires_grad = false;
-    for (const auto& tensor : inputs) {
-        requires_grad = requires_grad || tensor->requires_grad();
+    for (const auto& input : inputs) {
+        requires_grad = requires_grad || input->requires_grad();
     }
+    
     output_ = std::make_shared<Tensor>(result_data, output_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算连接操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> ConcatFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(inputs_.size());
+    
     size_t start_index = 0;
     for (size_t i = 0; i < inputs_.size(); ++i) {
         if (inputs_[i]->requires_grad()) {
-            std::vector<float> grad_data(inputs_[i]->size());
-            size_t end_index = start_index + inputs_[i]->size();
-            std::copy(grad_output->data().begin() + start_index, grad_output->data().begin() + end_index, grad_data.begin());
-            grads[i] = std::make_shared<Tensor>(grad_data, inputs_[i]->shape(), false);
+            const auto& input_shape = inputs_[i]->shape();
+            size_t num_elements = inputs_[i]->size();
+            
+            // 提取对应的梯度部分
+            std::vector<float> grad_data(
+                grad_output->data().begin() + start_index,
+                grad_output->data().begin() + start_index + num_elements
+            );
+            
+            grads[i] = std::make_shared<Tensor>(grad_data, input_shape, false);
         }
         start_index += inputs_[i]->size();
     }
+    
     return grads;
 }
-
-// SplitFunction实现
+/**
+ * 执行张量切片操作
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 切片后的张量列表
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr SplitFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SplitFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-
     const auto& input = inputs[0];
     const auto& input_shape = input->shape();
-
+    
+    // 验证维度
+    if (dim_ < 0) dim_ = input_shape.size() + dim_;
     if (dim_ < 0 || dim_ >= static_cast<int>(input_shape.size())) {
         throw std::invalid_argument("Invalid dimension for splitting");
     }
+    
+    // 验证分割数
     if (input_shape[dim_] % sections_ != 0) {
-        throw std::invalid_argument("The size of the specified dimension must be divisible by sections");
+        throw std::invalid_argument("Dimension size must be divisible by sections");
     }
-
+    
+    // 计算分割大小
     int split_size = input_shape[dim_] / sections_;
-    std::vector<int> split_shape = input_shape;
-    split_shape[dim_] = split_size;
-
-    std::vector<TensorPtr> split_tensors;
-    const auto& input_data = input->data();
-    int total_size = input->size();
-    int slice_size = total_size / sections_;
-
-    for (int i = 0; i < sections_; ++i) {
-        std::vector<float> split_data(slice_size);
-        for (int j = 0; j < slice_size; ++j) {
-            split_data[j] = input_data[i * slice_size + j];
-        }
-        TensorPtr split_tensor = std::make_shared<Tensor>(split_data, split_shape, input->requires_grad());
-        split_tensors.push_back(split_tensor);
-
-        if (input->requires_grad()) {
-            split_tensor->grad_fn_ = shared_from_this();
-            split_tensor->children_ = inputs;
-            split_tensor->is_leaf_ = false;
-        }
+    
+    // 计算输出形状
+    std::vector<int> output_shape = input_shape;
+    output_shape[dim_] = split_size;
+    
+    // 计算每个分割张量的元素数量
+    size_t slice_num_elements = 1;
+    for (int dim : output_shape) {
+        slice_num_elements *= dim;
     }
-
-    output_ = split_tensors[0];
-    return output_;
+    
+    // 计算当前切片的起始位置
+    slice_index_ = index_ * slice_num_elements;
+    
+    // 创建分割张量
+    const float* input_data = input->data_ptr();
+    std::vector<float> split_data(slice_num_elements);
+    for (size_t i = 0; i < slice_num_elements; ++i) {
+        split_data[i] = input_data[slice_index_ + i];
+    }
+    
+    bool requires_grad = input->requires_grad();
+    auto tensor = std::make_shared<Tensor>(split_data, output_shape, requires_grad);
+    
+    if (requires_grad) {
+        tensor->grad_fn_ = shared_from_this();
+        tensor->children_ = inputs;
+        tensor->is_leaf_ = false;
+    }
+    
+    return tensor; // 返回单个张量
 }
 
 std::vector<TensorPtr> SplitFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
-
+    
     if (inputs_[0]->requires_grad()) {
-        const auto& input = inputs_[0];
-        const auto& input_shape = input->shape();
-        int split_size = input_shape[dim_] / sections_;
-        std::vector<int> split_shape = input_shape;
-        split_shape[dim_] = split_size;
-
-        std::vector<float> grad_data(input->size());
-        const auto& grad_output_data = grad_output->data();
-        int slice_size = grad_output->size();
-
-        for (int i = 0; i < sections_; ++i) {
-            for (int j = 0; j < slice_size; ++j) {
-                grad_data[i * slice_size + j] = grad_output_data[j];
-            }
+        // 创建一个与输入相同形状的梯度张量
+        std::vector<float> grad_data(inputs_[0]->size(), 0.0f);
+        const float* grad_output_data = grad_output->data_ptr();
+        
+        // 将当前分割张量的梯度放到对应的位置
+        for (size_t i = 0; i < grad_output->size(); ++i) {
+            grad_data[slice_index_ + i] = grad_output_data[i];
         }
-
-        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
-
+    
     return grads;
 }
 
-// DotFunction实现
+/**
+ * 执行张量点积操作
+ * 
+ * @param inputs 输入张量列表（必须包含两个张量）
+ * @return 点积结果张量（标量）
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr DotFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 2) {
         throw std::invalid_argument("DotFunction requires exactly two inputs");
     }
+    
     inputs_ = inputs;
     const auto& a = inputs[0];
     const auto& b = inputs[1];
+    
+    // 检查形状兼容性
     if (a->size() != b->size()) {
         throw std::invalid_argument("Tensors must have the same size for dot product");
     }
-    const auto& data_a = a->data();
-    const auto& data_b = b->data();
+    
+    // 计算点积
     float dot_product = 0.0f;
-    for (size_t i = 0; i < data_a.size(); ++i) {
-        dot_product += data_a[i] * data_b[i];
+    const auto& a_data = a->data();
+    const auto& b_data = b->data();
+    for (size_t i = 0; i < a->size(); ++i) {
+        dot_product += a_data[i] * b_data[i];
     }
-    bool requires_grad = inputs[0]->requires_grad() || inputs[1]->requires_grad();
+    
+    bool requires_grad = a->requires_grad() || b->requires_grad();
     output_ = std::make_shared<Tensor>(std::vector<float>{dot_product}, std::vector<int>{1}, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算点积操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 每个输入张量的梯度列表
+ */
 std::vector<TensorPtr> DotFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(2);
-    const auto& a = inputs_[0];
-    const auto& b = inputs_[1];
-    const auto& grad_output_data = grad_output->data();
-    if (a->requires_grad()) {
-        std::vector<float> grad_data_a(a->size());
-        const auto& data_b = b->data();
-        for (size_t i = 0; i < grad_data_a.size(); ++i) {
-            grad_data_a[i] = grad_output_data[0] * data_b[i];
+    
+    const float grad_val = grad_output->data()[0];
+    
+    if (inputs_[0]->requires_grad()) {
+        std::vector<float> grad_data(inputs_[0]->size());
+        const auto& b_data = inputs_[1]->data();
+        for (size_t i = 0; i < grad_data.size(); ++i) {
+            grad_data[i] = grad_val * b_data[i];
         }
-        grads[0] = std::make_shared<Tensor>(grad_data_a, a->shape(), false);
+        grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
-    if (b->requires_grad()) {
-        std::vector<float> grad_data_b(b->size());
-        const auto& data_a = a->data();
-        for (size_t i = 0; i < grad_data_b.size(); ++i) {
-            grad_data_b[i] = grad_output_data[0] * data_a[i];
+    
+    if (inputs_[1]->requires_grad()) {
+        std::vector<float> grad_data(inputs_[1]->size());
+        const auto& a_data = inputs_[0]->data();
+        for (size_t i = 0; i < grad_data.size(); ++i) {
+            grad_data[i] = grad_val * a_data[i];
         }
-        grads[1] = std::make_shared<Tensor>(grad_data_b, b->shape(), false);
+        grads[1] = std::make_shared<Tensor>(grad_data, inputs_[1]->shape(), false);
     }
+    
     return grads;
 }
 
-// AbsFunction实现
+/**
+ * 执行张量绝对值操作
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 绝对值结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr AbsFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("AbsFunction requires exactly one input");
     }
+    
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::abs(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算绝对值
+    std::vector<float> result_data(input_data.size());
+    for (size_t i = 0; i < input_data.size(); ++i) {
+        result_data[i] = std::abs(input_data[i]);
     }
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, input_shape, requires_grad);
+    
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
+    
     return output_;
 }
 
+/**
+ * 计算绝对值操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> AbsFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& input_data = inputs_[0]->data();
         const auto& grad_output_data = grad_output->data();
+        
+        std::vector<float> grad_data(input_data.size());
         for (size_t i = 0; i < grad_data.size(); ++i) {
-            if (a_data[i] > 0) {
+            if (input_data[i] > 0) {
                 grad_data[i] = grad_output_data[i];
-            } else if (a_data[i] < 0) {
+            } else if (input_data[i] < 0) {
                 grad_data[i] = -grad_output_data[i];
             } else {
-                grad_data[i] = 0.0f; // 导数在0处不定义，设为0
+                grad_data[i] = 0.0f; // 0处的导数未定义，设为0
             }
         }
+        
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// ContiguousFunction 实现
+/**
+ * 执行张量连续内存操作
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 连续内存版本的张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr ContiguousFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("ContiguousFunction requires exactly one input");
@@ -1158,14 +2131,11 @@ TensorPtr ContiguousFunction::apply(const std::vector<TensorPtr>& inputs) {
     inputs_ = inputs;
     const auto& input = inputs[0];
     
-    // 创建连续内存副本（实际实现中可能需要处理跨步访问）
-    std::vector<float> contiguous_data(input->data());
-    
-    // 创建输出张量
+    // 创建连续内存副本
+    std::vector<float> contiguous_data = input->data();
     bool requires_grad = input->requires_grad();
-    output_ = std::make_shared<Tensor>(std::move(contiguous_data), input->shape(), requires_grad);
+    output_ = std::make_shared<Tensor>(contiguous_data, input->shape(), requires_grad);
     
-    // 设置梯度函数
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
@@ -1175,167 +2145,257 @@ TensorPtr ContiguousFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算连续内存操作的梯度
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> ContiguousFunction::backward(const TensorPtr& grad_output) {
     // 梯度直接传递回输入张量
     return { grad_output };
 }
 
-// ExpandFunction实现
-ExpandFunction::ExpandFunction(const std::vector<int>& new_shape) : new_shape_(new_shape) {}
-
+/**
+ * 执行张量扩展操作（支持广播）
+ * 
+ * 将输入张量扩展到指定的新形状，遵循广播规则：
+ * 1. 从后向前比较维度
+ * 2. 维度大小相同或输入维度大小为1时可广播
+ * 3. 新形状的每个维度大小必须 ≥ 输入对应维度大小
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return 扩展后的张量
+ * @throws std::invalid_argument 如果输入数量不正确或形状不兼容
+ */
 TensorPtr ExpandFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("ExpandFunction requires exactly one input");
     }
-
+    
+    inputs_ = inputs;
     const auto& input = inputs[0];
     const auto& input_shape = input->shape();
     const auto& input_data = input->data();
-
-    if (input_shape.size() > new_shape_.size()) {
-        throw std::invalid_argument("New shape must have at least as many dimensions as the input");
+    
+    // 检查广播兼容性
+    if (new_shape_.size() < input_shape.size()) {
+        throw std::invalid_argument("New shape must have at least as many dimensions as input");
     }
-
-    std::vector<int> expanded_shape = new_shape_;
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-        if (input_shape[i] != 1 && input_shape[i] != new_shape_[i + new_shape_.size() - input_shape.size()]) {
-            throw std::invalid_argument("Non-singleton dimensions must match");
+    
+    // 对齐维度（在输入形状前面添加维度1）
+    std::vector<int> aligned_input_shape = input_shape;
+    while (aligned_input_shape.size() < new_shape_.size()) {
+        aligned_input_shape.insert(aligned_input_shape.begin(), 1);
+    }
+    
+    // 检查每个维度是否兼容
+    for (size_t i = 0; i < new_shape_.size(); i++) {
+        if (aligned_input_shape[i] != new_shape_[i] && 
+            aligned_input_shape[i] != 1) {
+            std::ostringstream oss;
+            oss << "The size of dimension " << i << " must be 1 or equal to the new shape. "
+                << "Current: " << aligned_input_shape[i] << ", new shape: " << new_shape_[i];
+            throw std::invalid_argument(oss.str());
         }
     }
-
-    int expanded_size = 1;
-    for (int dim : expanded_shape) {
-        expanded_size *= dim;
+    
+    // 计算输出大小
+    size_t total_size = 1;
+    for (int dim : new_shape_) {
+        total_size *= dim;
     }
-
-    std::vector<float> expanded_data(expanded_size);
-
-    // 扩展数据
-    for (int idx = 0; idx < expanded_size; ++idx) {
-        std::vector<int> multi_idx(expanded_shape.size());
-        int temp_idx = idx;
-        for (int i = expanded_shape.size() - 1; i >= 0; --i) {
-            multi_idx[i] = temp_idx % expanded_shape[i];
-            temp_idx /= expanded_shape[i];
+    
+    // 计算输入和输出张量的步长
+    std::vector<size_t> input_strides(aligned_input_shape.size(), 0);
+    size_t input_stride = 1;
+    for (int i = aligned_input_shape.size() - 1; i >= 0; --i) {
+        input_strides[i] = (aligned_input_shape[i] > 1) ? input_stride : 0;
+        input_stride *= aligned_input_shape[i];
+    }
+    
+    std::vector<size_t> output_strides(new_shape_.size(), 1);
+    for (int i = new_shape_.size() - 2; i >= 0; --i) {
+        output_strides[i] = output_strides[i+1] * new_shape_[i+1];
+    }
+    
+    // 创建扩展后的数据
+    std::vector<float> expanded_data(total_size);
+    
+    // 使用索引计算填充数据
+    #pragma omp parallel for
+    for (size_t i = 0; i < total_size; ++i) {
+        size_t input_index = 0;
+        size_t remainder = i;
+        
+        // 计算每个维度上的坐标
+        for (int j = new_shape_.size() - 1; j >= 0; --j) {
+            int dim_size = new_shape_[j];
+            int coord = remainder % dim_size;
+            remainder /= dim_size;
+            
+            // 如果输入在该维度上大小为1，则使用0坐标
+            if (input_strides[j] != 0) {
+                coord = coord % aligned_input_shape[j];
+            } else {
+                coord = 0;
+            }
+            input_index += coord * input_strides[j];
         }
-
-        int input_idx = 0;
-        int stride = 1;
-        for (size_t i = 0; i < input_shape.size(); ++i) {
-            input_idx += multi_idx[i + expanded_shape.size() - input_shape.size()] * stride;
-            stride *= input_shape[i];
-        }
-
-        expanded_data[idx] = input_data[input_idx];
+        
+        expanded_data[i] = input_data[input_index];
     }
-
-    auto output = std::make_shared<Tensor>(expanded_data, expanded_shape, input->requires_grad());
-    if (output->requires_grad()) {
-        output->grad_fn_ = shared_from_this();
-        output->children_ = inputs;
-        output->is_leaf_ = false;
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(expanded_data, new_shape_, requires_grad);
+    
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
     }
-    return output;
+    
+    return output_;
 }
 
+/**
+ * 计算扩展操作的梯度
+ * 
+ * 将上游梯度缩减回输入张量的原始形状，遵循广播规则：
+ * 1. 对广播维度上的梯度进行求和
+ * 2. 非广播维度直接复制梯度
+ * 
+ * @param grad_output 上游梯度张量（扩展后的形状）
+ * @return 输入张量的梯度（原始形状）
+ */
 std::vector<TensorPtr> ExpandFunction::backward(const TensorPtr& grad_output) {
-    const auto& grad_output_shape = grad_output->shape();
-    const auto& grad_output_data = grad_output->data();
-
-    const auto& input = inputs_[0];
-    const auto& input_shape = input->shape();
-
-    std::vector<float> grad_input_data(input->size(), 0.0f);
-
-    for (int idx = 0; idx < grad_output->size(); ++idx) {
-        std::vector<int> multi_idx(grad_output_shape.size());
-        int temp_idx = idx;
-        for (int i = grad_output_shape.size() - 1; i >= 0; --i) {
-            multi_idx[i] = temp_idx % grad_output_shape[i];
-            temp_idx /= grad_output_shape[i];
+    std::vector<TensorPtr> grads(1);
+    
+    if (inputs_[0]->requires_grad()) {
+        const auto& input = inputs_[0];
+        const auto& input_shape = input->shape();
+        const auto& grad_output_data = grad_output->data();
+        const auto& new_shape = grad_output->shape();
+        
+        // 对齐输入形状
+        std::vector<int> aligned_input_shape = input_shape;
+        while (aligned_input_shape.size() < new_shape.size()) {
+            aligned_input_shape.insert(aligned_input_shape.begin(), 1);
         }
-
-        int input_idx = 0;
-        int stride = 1;
-        for (size_t i = 0; i < input_shape.size(); ++i) {
-            input_idx += multi_idx[i + grad_output_shape.size() - input_shape.size()] * stride;
-            stride *= input_shape[i];
+        
+        // 确定哪些维度是广播的
+        std::vector<bool> is_broadcast_dim(new_shape.size(), false);
+        for (size_t i = 0; i < new_shape.size(); i++) {
+            is_broadcast_dim[i] = (aligned_input_shape[i] == 1 && new_shape[i] > 1);
         }
-
-        grad_input_data[input_idx] += grad_output_data[idx];
+        
+        // 计算输入张量的步长
+        std::vector<size_t> input_strides(aligned_input_shape.size(), 0);
+        size_t input_stride = 1;
+        for (int i = aligned_input_shape.size() - 1; i >= 0; --i) {
+            input_strides[i] = (aligned_input_shape[i] > 1) ? input_stride : 0;
+            input_stride *= aligned_input_shape[i];
+        }
+        
+        // 初始化梯度
+        std::vector<float> grad_data(input->size(), 0.0f);
+        
+        // 遍历输出梯度张量的每个元素
+        for (size_t i = 0; i < grad_output_data.size(); ++i) {
+            size_t input_index = 0;
+            size_t remainder = i;
+            bool valid = true;
+            
+            // 计算输入索引
+            for (int j = new_shape.size() - 1; j >= 0; --j) {
+                int dim_size = new_shape[j];
+                int coord = remainder % dim_size;
+                remainder /= dim_size;
+                
+                // 如果输入在该维度上大小不为1，检查坐标是否在输入范围内
+                if (input_strides[j] != 0) {
+                    if (coord >= aligned_input_shape[j]) {
+                        valid = false;
+                        break;
+                    }
+                    input_index += coord * input_strides[j];
+                }
+                // 否则（广播维度），我们不需要增加索引
+            }
+            
+            if (valid) {
+                #pragma omp atomic
+                grad_data[input_index] += grad_output_data[i];
+            }
+        }
+        
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
-
-    auto grad_input = std::make_shared<Tensor>(grad_input_data, input_shape, false);
-    return {grad_input};
+    
+    return grads;
 }
 
-// ReLUFunction实现
+/**
+ * 执行ReLU激活函数操作（逐元素）
+ * 
+ * ReLU(x) = max(0, x)
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return ReLU激活结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr ReLUFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("ReLUFunction requires exactly one input");
     }
     
-    if (!inputs[0]) {
-        throw std::invalid_argument("ReLU input is null");
-    }
-    
     inputs_ = inputs;
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
     
-    const auto& in_data = inputs[0]->data();
-    std::vector<float> result_data(in_data.size());
-    const size_t size = in_data.size();
+    // 计算ReLU值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
     
-    _Pragma("omp parallel for simd")
+    #pragma omp parallel for simd
     for (size_t i = 0; i < size; ++i) {
-        result_data[i] = std::max(0.0f, in_data[i]);
+        result_data[i] = std::max(0.0f, input_data[i]);
     }
     
-    bool requires_grad = inputs[0]->requires_grad();
-    auto output = std::make_shared<Tensor>(
-        std::move(result_data), 
-        std::vector<int>(inputs[0]->shape()), 
-        requires_grad
-    );
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, input_shape, requires_grad);
     
     if (requires_grad) {
-        output->grad_fn_ = shared_from_this();
-        output->children_ = inputs;
-        output->is_leaf_ = false;
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
     }
     
-    return output;
+    return output_;
 }
 
+/**
+ * 计算ReLU操作的梯度
+ * 
+ * grad_input = grad_output * (x > 0 ? 1 : 0)
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> ReLUFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
     
-    // 检查输入是否有效
-    if (inputs_.empty() || !inputs_[0]) {
-        std::cerr << "ReLU backward error: inputs_[0] is null!" << std::endl;
-        return grads;
-    }
-    
-    if (!grad_output) {
-        std::cerr << "ReLU backward error: grad_output is null!" << std::endl;
-        return grads;
-    }
-    
     if (inputs_[0]->requires_grad()) {
-        std::vector<float> grad_data(inputs_[0]->size());
-        const auto& a_data = inputs_[0]->data();
+        const auto& input_data = inputs_[0]->data();
         const auto& grad_output_data = grad_output->data();
         
-        // 检查大小是否匹配
-        if (grad_data.size() != grad_output_data.size()) {
-            std::cerr << "ReLU backward size mismatch: " 
-                      << grad_data.size() << " vs " << grad_output_data.size()
-                      << std::endl;
-            return grads;
-        }
+        std::vector<float> grad_data(input_data.size());
+        const size_t size = grad_data.size();
         
-        _Pragma("omp parallel for simd")
-        for (size_t i = 0; i < grad_data.size(); ++i) {
-            grad_data[i] = grad_output_data[i] * (a_data[i] > 0 ? 1.0f : 0.0f);
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
+            grad_data[i] = grad_output_data[i] * (input_data[i] > 0 ? 1.0f : 0.0f);
         }
         
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
@@ -1344,47 +2404,114 @@ std::vector<TensorPtr> ReLUFunction::backward(const TensorPtr& grad_output) {
     return grads;
 }
 
-// SigmoidFunction实现
+/**
+ * 执行Sigmoid激活函数操作（逐元素）
+ * 
+ * Sigmoid(x) = 1 / (1 + exp(-x))
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return Sigmoid激活结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr SigmoidFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SigmoidFunction requires exactly one input");
     }
-    VECTORIZED_LOOP(1.0f / (1.0f + std::exp(-in_data[i])));
+    
+    inputs_ = inputs;
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算Sigmoid值（数值稳定版本）
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        // 数值稳定版本：避免大的负数导致exp溢出
+        float x = input_data[i];
+        if (x >= 0) {
+            float exp_x = std::exp(-x);
+            result_data[i] = 1.0f / (1.0f + exp_x);
+        } else {
+            float exp_x = std::exp(x);
+            result_data[i] = exp_x / (exp_x + 1.0f);
+        }
+    }
+    
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, input_shape, requires_grad);
+    
+    if (requires_grad) {
+        output_->grad_fn_ = shared_from_this();
+        output_->children_ = inputs;
+        output_->is_leaf_ = false;
+    }
+    
+    return output_;
 }
 
+/**
+ * 计算Sigmoid操作的梯度
+ * 
+ * grad_input = grad_output * sigmoid(x) * (1 - sigmoid(x))
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> SigmoidFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        const auto& output_data = output_->data(); // 前向传播的输出
+        const auto& output_data = output_->data();
         const auto& grad_output_data = grad_output->data();
         
         std::vector<float> grad_data(inputs_[0]->size());
-        _Pragma("omp parallel for simd")
-        for (size_t i = 0; i < grad_data.size(); ++i) {
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
             float s = output_data[i];
-            grad_data[i] = grad_output_data[i] * s * (1 - s); // σ'(x) = σ(x)(1-σ(x))
+            grad_data[i] = grad_output_data[i] * s * (1 - s);
         }
         
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// TanhFunction实现
+/**
+ * 执行Tanh激活函数操作（逐元素）
+ * 
+ * Tanh(x) = tanh(x)
+ * 
+ * @param inputs 输入极量列表（必须包含一个张量）
+ * @return Tanh激活结果张量
+ * @throws std::invalid_argument 如果输入数量不正确
+ */
 TensorPtr TanhFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("TanhFunction requires exactly one input");
     }
     
     inputs_ = inputs;
-    const auto& a_data = inputs[0]->data();
-    std::vector<float> result_data(a_data.size());
-    for (size_t i = 0; i < a_data.size(); ++i) {
-        result_data[i] = std::tanh(a_data[i]);
+    const auto& input = inputs[0];
+    const auto& input_data = input->data();
+    const auto& input_shape = input->shape();
+    
+    // 计算Tanh值
+    std::vector<float> result_data(input_data.size());
+    const size_t size = input_data.size();
+    
+    #pragma omp parallel for simd
+    for (size_t i = 0; i < size; ++i) {
+        result_data[i] = std::tanh(input_data[i]);
     }
     
-    bool requires_grad = inputs[0]->requires_grad();
-    output_ = std::make_shared<Tensor>(result_data, inputs[0]->shape(), requires_grad);
+    bool requires_grad = input->requires_grad();
+    output_ = std::make_shared<Tensor>(result_data, input_shape, requires_grad);
     
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
@@ -1395,24 +2522,45 @@ TensorPtr TanhFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算Tanh操作的梯度
+ * 
+ * grad_input = grad_output * (1 - tanh²(x))
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> TanhFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        const auto& output_data = output_->data(); // 前向传播的输出
+        const auto& output_data = output_->data();
         const auto& grad_output_data = grad_output->data();
         
         std::vector<float> grad_data(inputs_[0]->size());
-        for (size_t i = 0; i < grad_data.size(); ++i) {
+        const size_t size = grad_data.size();
+        
+        #pragma omp parallel for simd
+        for (size_t i = 0; i < size; ++i) {
             float t = output_data[i];
-            grad_data[i] = grad_output_data[i] * (1 - t * t); // tanh'(x) = 1 - tanh²(x)
+            grad_data[i] = grad_output_data[i] * (1 - t * t);
         }
         
         grads[0] = std::make_shared<Tensor>(grad_data, inputs_[0]->shape(), false);
     }
+    
     return grads;
 }
 
-// SoftmaxFunction实现
+/**
+ * 执行Softmax激活函数操作（沿指定维度）
+ * 
+ * Softmax(x_i) = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
+ * 
+ * @param inputs 输入张量列表（必须包含一个张量）
+ * @return Softmax激活结果张量
+ * @throws std::invalid_argument 如果输入数量不正确或维度无效
+ */
 TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("SoftmaxFunction requires exactly one input");
@@ -1420,65 +2568,65 @@ TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     
     inputs_ = inputs;
     const auto& input = inputs[0];
+    const auto& input_shape = input->shape();
     const auto& input_data = input->data();
-    const auto& shape = input->shape();
     
-    int actual_dim = dim_ < 0 ? shape.size() + dim_ : dim_;
-    if (actual_dim < 0 || actual_dim >= static_cast<int>(shape.size())) {
+    // 确定实际维度
+    int actual_dim = dim_;
+    if (actual_dim < 0) {
+        actual_dim = input_shape.size() + actual_dim;
+    }
+    if (actual_dim < 0 || actual_dim >= static_cast<int>(input_shape.size())) {
         throw std::invalid_argument("Invalid dimension for softmax");
     }
     
+    // 计算输出形状（与输入相同）
+    std::vector<float> result_data(input_data.size());
+    const int dim_size = input_shape[actual_dim];
+    
     // 计算沿指定维度的元素数量
-    int outer_size = 1;
+    size_t outer_size = 1;
     for (int i = 0; i < actual_dim; ++i) {
-        outer_size *= shape[i];
+        outer_size *= input_shape[i];
     }
     
-    int inner_size = 1;
-    for (int i = actual_dim + 1; i < static_cast<int>(shape.size()); ++i) {
-        inner_size *= shape[i];
+    size_t inner_size = 1;
+    for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+        inner_size *= input_shape[i];
     }
     
-    int dim_size = shape[actual_dim];
-    int step_size = inner_size * dim_size;
-    int total_size = input->size();
-    
-    std::vector<float> result_data(total_size);
-    const float* input_ptr = input_data.data();
-    
-    _Pragma("omp parallel for")
-    for (int i = 0; i < outer_size; ++i) {
-        for (int j = 0; j < inner_size; ++j) {
-            const int base_idx = i * step_size + j;
-            
-            // 找到当前切片的最大值
+    // 数值稳定的Softmax实现
+    #pragma omp parallel for
+    for (size_t i = 0; i < outer_size; ++i) {
+        for (size_t j = 0; j < inner_size; ++j) {
+            // 步骤1: 找到最大值（数值稳定性）
             float max_val = -std::numeric_limits<float>::infinity();
             for (int k = 0; k < dim_size; ++k) {
-                int idx = base_idx + k * inner_size;
-                if (input_ptr[idx] > max_val) {
-                    max_val = input_ptr[idx];
+                size_t idx = (i * dim_size + k) * inner_size + j;
+                if (input_data[idx] > max_val) {
+                    max_val = input_data[idx];
                 }
             }
             
-            // 计算指数和
+            // 步骤2: 计算指数和
             float exp_sum = 0.0f;
             for (int k = 0; k < dim_size; ++k) {
-                int idx = base_idx + k * inner_size;
-                float exp_val = std::exp(input_ptr[idx] - max_val);
+                size_t idx = (i * dim_size + k) * inner_size + j;
+                float exp_val = std::exp(input_data[idx] - max_val);
                 result_data[idx] = exp_val;
                 exp_sum += exp_val;
             }
             
-            // 归一化
+            // 步骤3: 归一化
             for (int k = 0; k < dim_size; ++k) {
-                int idx = base_idx + k * inner_size;
+                size_t idx = (i * dim_size + k) * inner_size + j;
                 result_data[idx] /= exp_sum;
             }
         }
     }
     
     bool requires_grad = input->requires_grad();
-    output_ = std::make_shared<Tensor>(std::move(result_data), shape, requires_grad);
+    output_ = std::make_shared<Tensor>(result_data, input_shape, requires_grad);
     
     if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
@@ -1489,62 +2637,67 @@ TensorPtr SoftmaxFunction::apply(const std::vector<TensorPtr>& inputs) {
     return output_;
 }
 
+/**
+ * 计算Softmax操作的梯度
+ * 
+ * 对于Softmax函数 S = [s1, s2, ..., sn]，其雅可比矩阵为：
+ * ∂s_i/∂x_j = s_i * (δ_ij - s_j)
+ * 
+ * grad_input = grad_output * (diag(S) - S·S^T)
+ * 
+ * @param grad_output 上游梯度张量
+ * @return 输入张量的梯度
+ */
 std::vector<TensorPtr> SoftmaxFunction::backward(const TensorPtr& grad_output) {
     std::vector<TensorPtr> grads(1);
+    
     if (inputs_[0]->requires_grad()) {
-        const auto& output_data = output_->data();  // softmax输出
+        const auto& input_shape = inputs_[0]->shape();
         const auto& grad_output_data = grad_output->data();
-        const auto& shape = inputs_[0]->shape();
+        const auto& output_data = output_->data();
         
         // 确定实际维度
         int actual_dim = dim_;
         if (actual_dim < 0) {
-            actual_dim = shape.size() + actual_dim;
+            actual_dim = input_shape.size() + actual_dim;
         }
         
-        // 计算维度参数
-        int outer_size = 1;
+        // 计算沿指定维度的元素数量
+        size_t outer_size = 1;
         for (int i = 0; i < actual_dim; ++i) {
-            outer_size *= shape[i];
+            outer_size *= input_shape[i];
         }
         
-        int inner_size = 1;
-        for (int i = actual_dim + 1; i < static_cast<int>(shape.size()); ++i) {
-            inner_size *= shape[i];
+        size_t inner_size = 1;
+        for (size_t i = actual_dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
         }
         
-        int dim_size = shape[actual_dim];
-        int step_size = inner_size * dim_size;
+        const int dim_size = input_shape[actual_dim];
+        std::vector<float> grad_data(input_shape.size());
         
         // 计算梯度
-        std::vector<float> grad_data(output_data.size(), 0.0f);
-        
-        for (int i = 0; i < outer_size; ++i) {
-            for (int j = 0; j < inner_size; ++j) {
-                // 计算雅可比矩阵的点积
+        #pragma omp parallel for
+        for (size_t i = 0; i < outer_size; ++i) {
+            for (size_t j = 0; j < inner_size; ++j) {
+                // 计算点积: grad_output·S
+                float dot_product = 0.0f;
                 for (int k = 0; k < dim_size; ++k) {
-                    int idx_k = i * step_size + k * inner_size + j;
-                    float sum = 0.0f;
-                    
-                    for (int l = 0; l < dim_size; ++l) {
-                        int idx_l = i * step_size + l * inner_size + j;
-                        float grad_val = grad_output_data[idx_l];
-                        
-                        // 雅可比矩阵项: ∂y_l/∂x_k
-                        float jacobian = output_data[idx_l] * 
-                                        ((k == l) ? (1.0f - output_data[idx_k]) 
-                                                  : (-output_data[idx_k]));
-                        
-                        sum += grad_val * jacobian;
-                    }
-                    
-                    grad_data[idx_k] = sum;
+                    size_t idx = (i * dim_size + k) * inner_size + j;
+                    dot_product += grad_output_data[idx] * output_data[idx];
+                }
+                
+                // 计算梯度
+                for (int k = 0; k < dim_size; ++k) {
+                    size_t idx = (i * dim_size + k) * inner_size + j;
+                    grad_data[idx] = output_data[idx] * (grad_output_data[idx] - dot_product);
                 }
             }
         }
         
-        grads[0] = std::make_shared<Tensor>(grad_data, shape, false);
+        grads[0] = std::make_shared<Tensor>(grad_data, input_shape, false);
     }
+    
     return grads;
 }
 
@@ -1556,6 +2709,7 @@ AvgPool2dFunction::AvgPool2dFunction(int kernel_size, int stride, int padding)
         throw std::invalid_argument("Invalid pooling parameters");
     }
 }
+
 TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("AvgPool2dFunction expects exactly one input");
@@ -1566,7 +2720,7 @@ TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
         throw std::invalid_argument("AvgPool2d expects 4D input");
     }
     
-    input_shape_ = shape; // 保存输入形状
+    input_shape_ = shape;
     
     const int batch_size = shape[0];
     const int in_channels = shape[1];
@@ -1584,34 +2738,62 @@ TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     const float* x_data = x->data_ptr();
     float* output_ptr = output_data.data();
 
+    // 预计算每个池化窗口的有效面积
+    std::vector<int> window_areas(out_height * out_width);
+    for (int h_out = 0; h_out < out_height; ++h_out) {
+        const int h_start = h_out * stride_ - padding_;
+        const int h_end = std::min(h_start + kernel_size_, in_height);
+        const int h_low = std::max(0, h_start);
+        const int h_size = h_end - h_low;
+        
+        for (int w_out = 0; w_out < out_width; ++w_out) {
+            const int w_start = w_out * stride_ - padding_;
+            const int w_end = std::min(w_start + kernel_size_, in_width);
+            const int w_low = std::max(0, w_start);
+            const int w_size = w_end - w_low;
+            
+            window_areas[h_out * out_width + w_out] = h_size * w_size;
+        }
+    }
+
+    // 使用并行化和优化内存访问
+    #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_size; ++b) {
         for (int c = 0; c < in_channels; ++c) {
+            const int channel_offset = b * in_channels * in_height * in_width + 
+                                      c * in_height * in_width;
+            
             for (int h_out = 0; h_out < out_height; ++h_out) {
                 const int h_start = h_out * stride_ - padding_;
-                const int h_end = h_start + kernel_size_;
+                const int h_end = std::min(h_start + kernel_size_, in_height);
                 const int h_low = std::max(0, h_start);
-                const int h_high = std::min(in_height, h_end);
-
+                
                 for (int w_out = 0; w_out < out_width; ++w_out) {
                     const int w_start = w_out * stride_ - padding_;
-                    const int w_end = w_start + kernel_size_;
+                    const int w_end = std::min(w_start + kernel_size_, in_width);
                     const int w_low = std::max(0, w_start);
-                    const int w_high = std::min(in_width, w_end);
-
-                    float sum = 0.0f;
-                    int count = 0;
                     
-                    // 仅在有有效区域时计算
-                    if (h_low < h_high && w_low < w_high) {
-                        for (int h_in = h_low; h_in < h_high; ++h_in) {
-                            for (int w_in = w_low; w_in < w_high; ++w_in) {
-                                const size_t index = tensor_index(shape, b, c, h_in, w_in);
-                                sum += x_data[index];
-                                count++;
-                            }
-                        }
+                    const int area = window_areas[h_out * out_width + w_out];
+                    if (area == 0) {
+                        *output_ptr++ = 0.0f;
+                        continue;
                     }
-                    *output_ptr++ = (count > 0) ? (sum / count) : 0.0f;
+                    
+                    float sum = 0.0f;
+                    const float* row_start = x_data + channel_offset + h_low * in_width;
+                    
+                    for (int h_in = h_low; h_in < h_end; ++h_in) {
+                        const float* col_start = row_start + w_low;
+                        const float* col_end = row_start + w_end;
+                        
+                        // 使用指针算术优化内存访问
+                        for (const float* ptr = col_start; ptr < col_end; ++ptr) {
+                            sum += *ptr;
+                        }
+                        row_start += in_width;
+                    }
+                    
+                    *output_ptr++ = sum / area;
                 }
             }
         }
@@ -1620,7 +2802,6 @@ TensorPtr AvgPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     std::vector<int> output_shape = {batch_size, in_channels, out_height, out_width};
     auto output = std::make_shared<Tensor>(output_data, output_shape, x->requires_grad());
     
-    // 设置输入和输出张量
     inputs_ = inputs;
     output_ = output;
     
@@ -1642,27 +2823,63 @@ std::vector<TensorPtr> AvgPool2dFunction::backward(const TensorPtr& grad_output)
         std::vector<float> grad_input_data(batch_size * in_channels * in_height * in_width, 0.0f);
         const float* grad_output_data = grad_output->data_ptr();
 
+        // 预计算每个池化窗口的有效面积
+        std::vector<int> window_areas(out_height * out_width);
+        for (int h_out = 0; h_out < out_height; ++h_out) {
+            const int h_start = h_out * stride_ - padding_;
+            const int h_end = std::min(h_start + kernel_size_, in_height);
+            const int h_low = std::max(0, h_start);
+            const int h_size = h_end - h_low;
+            
+            for (int w_out = 0; w_out < out_width; ++w_out) {
+                const int w_start = w_out * stride_ - padding_;
+                const int w_end = std::min(w_start + kernel_size_, in_width);
+                const int w_low = std::max(0, w_start);
+                const int w_size = w_end - w_low;
+                
+                window_areas[h_out * out_width + w_out] = h_size * w_size;
+            }
+        }
+
+        // 使用并行化和优化内存访问
+        #pragma omp parallel for collapse(2)
         for (int b = 0; b < batch_size; ++b) {
             for (int c = 0; c < in_channels; ++c) {
+                const int channel_offset = b * in_channels * in_height * in_width + 
+                                          c * in_height * in_width;
+                float* grad_channel = grad_input_data.data() + channel_offset;
+                
                 for (int h_out = 0; h_out < out_height; ++h_out) {
                     const int h_start = h_out * stride_ - padding_;
-                    const int h_end = h_start + kernel_size_;
+                    const int h_end = std::min(h_start + kernel_size_, in_height);
                     const int h_low = std::max(0, h_start);
-                    const int h_high = std::min(in_height, h_end);
-
+                    
                     for (int w_out = 0; w_out < out_width; ++w_out) {
                         const int w_start = w_out * stride_ - padding_;
-                        const int w_end = w_start + kernel_size_;
+                        const int w_end = std::min(w_start + kernel_size_, in_width);
                         const int w_low = std::max(0, w_start);
-                        const int w_high = std::min(in_width, w_end);
-
-                        int count = (h_high - h_low) * (w_high - w_low);
-                        float grad = grad_output_data[tensor_index(output_shape, b, c, h_out, w_out)] / count;
-
-                        for (int h_in = h_low; h_in < h_high; ++h_in) {
-                            for (int w_in = w_low; w_in < w_high; ++w_in) {
-                                grad_input_data[tensor_index(input_shape_, b, c, h_in, w_in)] += grad;
+                        
+                        const int area = window_areas[h_out * out_width + w_out];
+                        if (area == 0) continue;
+                        
+                        const float grad_val = grad_output_data[
+                            b * (in_channels * out_height * out_width) + 
+                            c * (out_height * out_width) +
+                            h_out * out_width + 
+                            w_out] / area;
+                        
+                        float* row_start = grad_channel + h_low * in_width;
+                        
+                        for (int h_in = h_low; h_in < h_end; ++h_in) {
+                            float* col_start = row_start + w_low;
+                            float* col_end = row_start + w_end;
+                            
+                            // 使用指针算术优化内存访问
+                            for (float* ptr = col_start; ptr < col_end; ++ptr) {
+                                #pragma omp atomic
+                                *ptr += grad_val;
                             }
+                            row_start += in_width;
                         }
                     }
                 }
@@ -1681,6 +2898,8 @@ MaxPool2dFunction::MaxPool2dFunction(int kernel_size, int stride, int padding)
         throw std::invalid_argument("Invalid pooling parameters");
     }
 }
+
+// MaxPool2dFunction 实现
 TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     if (inputs.size() != 1) {
         throw std::invalid_argument("MaxPool2dFunction expects exactly one input");
@@ -1708,9 +2927,13 @@ TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     const int out_c_stride = out_height * out_width;
     const int out_b_stride = in_channels * out_c_stride;
 
-    _Pragma("omp parallel for collapse(2)")
+    // 使用更高效的并行化和内存访问模式
+    #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch_size; ++b) {
         for (int c = 0; c < in_channels; ++c) {
+            const int in_base = b * in_b_stride + c * in_c_stride;
+            const int out_base = b * out_b_stride + c * out_c_stride;
+            
             for (int oh = 0; oh < out_height; ++oh) {
                 const int h_start = oh * stride_ - padding_;
                 const int h_end = std::min(h_start + kernel_size_, in_height);
@@ -1721,22 +2944,27 @@ TensorPtr MaxPool2dFunction::apply(const std::vector<TensorPtr>& inputs) {
                     const int w_end = std::min(w_start + kernel_size_, in_width);
                     const int w_low = std::max(0, w_start);
                     
-                    const int out_idx = b * out_b_stride + c * out_c_stride + oh * out_width + ow;
-                    float max_val = -std::numeric_limits<float>::infinity();
+                    const int out_idx = out_base + oh * out_width + ow;
+                    float max_val = -FLT_MAX; // 使用 FLT_MAX
                     int max_index = -1;
-                    const int in_base = b * in_b_stride + c * in_c_stride;
+                    
+                    // 使用指针算术优化内存访问
+                    const float* window_start = x_data + in_base + h_low * in_width;
                     
                     for (int kh = h_low; kh < h_end; ++kh) {
-                        for (int kw = w_low; kw < w_end; ++kw) {
-                            const int in_idx = in_base + kh * in_width + kw;
-                            if (x_data[in_idx] > max_val) {
-                                max_val = x_data[in_idx];
-                                max_index = in_idx;
+                        const float* row_start = window_start + w_low;
+                        const float* row_end = window_start + w_end;
+                        
+                        for (const float* ptr = row_start; ptr < row_end; ++ptr) {
+                            if (*ptr > max_val) {
+                                max_val = *ptr;
+                                max_index = ptr - x_data;
                             }
                         }
+                        window_start += in_width; // 移动到下一行
                     }
                     
-                    output_data[out_idx] = (max_val == -std::numeric_limits<float>::infinity()) ? 0.0f : max_val;
+                    output_data[out_idx] = (max_val > -FLT_MAX) ? max_val : 0.0f;
                     argmax_indices_[out_idx] = max_index;
                 }
             }
@@ -1791,96 +3019,88 @@ TensorPtr Conv2dFunction::apply(const std::vector<TensorPtr>& inputs) {
     }
 
     inputs_ = inputs;
-    input_shape_ = inputs[0]->shape();
-
-    const auto& x = inputs[0];
+    const auto& input = inputs[0];
     const auto& weight = inputs[1];
-
-    // 检查输入形状 (batch_size, channels, height, width)
-    if (x->shape().size() != 4) {
-        throw std::invalid_argument("Conv2d expects 4D input (batch, channels, height, width)");
-    }
-
-    const int batch_size = x->shape()[0];
-    const int in_channels = x->shape()[1];
-    const int in_height = x->shape()[2];
-    const int in_width = x->shape()[3];
-
-    if (in_channels != in_channels_) {
-        throw std::invalid_argument("Input channels (" + std::to_string(in_channels) + 
-                                   ") don't match layer channels (" + std::to_string(in_channels_) + ")");
-    }
-
-    const int out_height = (in_height + 2 * padding_ - kernel_size_) / stride_ + 1;
-    const int out_width = (in_width + 2 * padding_ - kernel_size_) / stride_ + 1;
-
-    if (out_height <= 0 || out_width <= 0) {
-        throw std::invalid_argument("Output dimensions must be positive. Calculated: " + 
-                                   std::to_string(out_height) + "x" + std::to_string(out_width));
-    }
-
-    std::vector<float> output_data(batch_size * out_channels_ * out_height * out_width, 0.0f);
-    const float* x_data = x->data_ptr();
-    const float* weight_data = weight->data_ptr();
-
-    // 预计算偏移量和步长
-    const int in_c_stride = in_height * in_width;
-    const int in_b_stride = in_channels_ * in_c_stride;
-    const int out_c_stride = out_height * out_width;
-    const int out_b_stride = out_channels_ * out_c_stride;
-    const int weight_oc_stride = in_channels_ * kernel_size_ * kernel_size_;
-    const int weight_ic_stride = kernel_size_ * kernel_size_;
-
-    _Pragma("omp parallel for collapse(2)")
-    for (int b = 0; b < batch_size; ++b) {
-        for (int oc = 0; oc < out_channels_; ++oc) {
-            for (int oh = 0; oh < out_height; ++oh) {
-                const int h_start = oh * stride_ - padding_;
-                const int h_end = std::min(h_start + kernel_size_, in_height);
-                const int h_low = std::max(0, h_start);
-
-                for (int ow = 0; ow < out_width; ++ow) {
-                    const int w_start = ow * stride_ - padding_;
-                    const int w_end = std::min(w_start + kernel_size_, in_width);
-                    const int w_low = std::max(0, w_start);
-
-                    float sum = 0.0f;
-                    const int out_idx = b * out_b_stride + oc * out_c_stride + oh * out_width + ow;
-
-                    for (int ic = 0; ic < in_channels_; ++ic) {
-                        const int in_base = b * in_b_stride + ic * in_c_stride;
-                        const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
-
-                        for (int kh = h_low; kh < h_end; ++kh) {
-                            const int in_h_idx = (kh - h_start) * in_width;
-                            const int weight_h_idx = (kh - h_low) * kernel_size_;
-
-                            for (int kw = w_low; kw < w_end; ++kw) {
-                                const int in_idx = in_base + kh * in_width + kw;
-                                const int weight_idx = weight_base + weight_h_idx + (kw - w_low);
-                                sum += x_data[in_idx] * weight_data[weight_idx];
-                            }
+    
+    // 获取输入形状 [N, C_in, H_in, W_in]
+    const auto& input_shape = input->shape();
+    const int N = input_shape[0];
+    const int C_in = input_shape[1];
+    const int H_in = input_shape[2];
+    const int W_in = input_shape[3];
+    
+    // 获取权重形状 [C_out, C_in, K, K]
+    const auto& weight_shape = weight->shape();
+    const int C_out = weight_shape[0];
+    const int K = weight_shape[2];
+    
+    // 计算输出尺寸
+    const int H_out = (H_in + 2 * padding_ - K) / stride_ + 1;
+    const int W_out = (W_in + 2 * padding_ - K) / stride_ + 1;
+    
+    // 使用im2col方法优化卷积
+    const int col_height = C_in * K * K;
+    const int col_width = N * H_out * W_out;
+    std::vector<float> col_data(col_height * col_width);
+    
+    // 执行im2col转换（高效实现）
+    #pragma omp parallel for collapse(3)
+    for (int n = 0; n < N; ++n) {
+        for (int h = 0; h < H_out; ++h) {
+            for (int w = 0; w < W_out; ++w) {
+                const int h_start = h * stride_ - padding_;
+                const int w_start = w * stride_ - padding_;
+                
+                for (int c = 0; c < C_in; ++c) {
+                    for (int i = 0; i < K; ++i) {
+                        const int h_idx = h_start + i;
+                        if (h_idx < 0 || h_idx >= H_in) continue;
+                        
+                        for (int j = 0; j < K; ++j) {
+                            const int w_idx = w_start + j;
+                            if (w_idx < 0 || w_idx >= W_in) continue;
+                            
+                            const int col_index = ((n * H_out + h) * W_out + w) * col_height + 
+                                                 (c * K * K + i * K + j);
+                            const int in_index = ((n * C_in + c) * H_in + h_idx) * W_in + w_idx;
+                            col_data[col_index] = input->data_ptr()[in_index];
                         }
                     }
-                    output_data[out_idx] = sum;
                 }
             }
         }
     }
-
-    std::vector<int> output_shape = {batch_size, out_channels_, out_height, out_width};
-    output_ = std::make_shared<Tensor>(
-        std::move(output_data), 
-        output_shape,
-        inputs[0]->requires_grad() || inputs[1]->requires_grad()
-    );
-
-    if (output_->requires_grad()) {
+    
+    // 将权重重塑为2D矩阵 [C_out, C_in*K*K]
+    const float* weight_ptr = weight->data_ptr();
+    
+    // 执行矩阵乘法: output = weight * col_matrix
+    std::vector<float> output_data(N * C_out * H_out * W_out, 0.0f);
+    #pragma omp parallel for collapse(2)
+    for (int n = 0; n < N; ++n) {
+        for (int c_out = 0; c_out < C_out; ++c_out) {
+            for (int hw = 0; hw < H_out * W_out; ++hw) {
+                float sum = 0.0f;
+                for (int k = 0; k < col_height; ++k) {
+                    const int weight_idx = c_out * col_height + k;
+                    const int col_idx = (n * H_out * W_out + hw) * col_height + k;
+                    sum += weight_ptr[weight_idx] * col_data[col_idx];
+                }
+                output_data[(n * C_out + c_out) * H_out * W_out + hw] = sum;
+            }
+        }
+    }
+    
+    std::vector<int> output_shape = {N, C_out, H_out, W_out};
+    bool requires_grad = input->requires_grad() || weight->requires_grad();
+    output_ = std::make_shared<Tensor>(output_data, output_shape, requires_grad);
+    
+    if (requires_grad) {
         output_->grad_fn_ = shared_from_this();
         output_->children_ = inputs;
         output_->is_leaf_ = false;
     }
-
+    
     return output_;
 }
 
@@ -1894,6 +3114,9 @@ std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
     const int in_width = input_shape_[3];
     const int out_height = grad_output->shape()[2];
     const int out_width = grad_output->shape()[3];
+    const float* grad_output_data = grad_output->data_ptr();
+    const float* x_data = x->data_ptr();
+    const float* weight_data = weight->data_ptr();
 
     // 预计算步长
     const int in_c_stride = in_height * in_width;
@@ -1906,39 +3129,50 @@ std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
     // grad_x
     if (x->requires_grad()) {
         std::vector<float> grad_x_data(batch_size * in_channels_ * in_height * in_width, 0.0f);
-        const float* grad_output_data = grad_output->data_ptr();
-        const float* weight_data = weight->data_ptr();
-
-        _Pragma("omp parallel for collapse(2)")
+        
+        // 优化1: 循环重排序，提高内存局部性
+        #pragma omp parallel for collapse(2)
         for (int b = 0; b < batch_size; ++b) {
-            for (int oc = 0; oc < out_channels_; ++oc) {
-                for (int oh = 0; oh < out_height; ++oh) {
-                    const int h_start = oh * stride_ - padding_;
-                    const int h_end = std::min(h_start + kernel_size_, in_height);
-                    const int h_low = std::max(0, h_start);
+            for (int ic = 0; ic < in_channels_; ++ic) {
+                const int in_base = b * in_b_stride + ic * in_c_stride;
+                
+                for (int oc = 0; oc < out_channels_; ++oc) {
+                    const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
                     
-                    for (int ow = 0; ow < out_width; ++ow) {
-                        const int w_start = ow * stride_ - padding_;
-                        const int w_end = std::min(w_start + kernel_size_, in_width);
-                        const int w_low = std::max(0, w_start);
+                    for (int oh = 0; oh < out_height; ++oh) {
+                        const int h_start = oh * stride_ - padding_;
+                        const int h_end = std::min(h_start + kernel_size_, in_height);
+                        const int h_low = std::max(0, h_start);
                         
-                        const float grad_val = grad_output_data[
-                            b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
-                        
-                        for (int ic = 0; ic < in_channels_; ++ic) {
-                            const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
+                        for (int ow = 0; ow < out_width; ++ow) {
+                            const int w_start = ow * stride_ - padding_;
+                            const int w_end = std::min(w_start + kernel_size_, in_width);
+                            const int w_low = std::max(0, w_start);
+                            
+                            const float grad_val = grad_output_data[
+                                b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
+                            
+                            // 优化2: 预计算权重偏移
+                            const float* weight_ptr = weight_data + weight_base;
+                            
+                            // 优化3: 指针算术代替索引计算
+                            float* grad_x_ptr = grad_x_data.data() + in_base + h_low * in_width;
                             
                             for (int kh = h_low; kh < h_end; ++kh) {
-                                const int weight_h_idx = (kh - h_low) * kernel_size_;
-                                const int in_h_idx = kh * in_width;
+                                const int weight_h_offset = (kh - h_low) * kernel_size_;
+                                const float* weight_row = weight_ptr + weight_h_offset;
                                 
+                                float* grad_x_row = grad_x_ptr + w_low;
+                                const float* grad_x_row_end = grad_x_ptr + w_end;
+                                
+                                // 优化4: 内层循环向量化
+                                #pragma omp simd
                                 for (int kw = w_low; kw < w_end; ++kw) {
-                                    const int weight_idx = weight_base + weight_h_idx + (kw - w_low);
-                                    const int in_idx = b * in_b_stride + ic * in_c_stride + in_h_idx + kw;
-                                    
-                                    #pragma omp atomic
-                                    grad_x_data[in_idx] += grad_val * weight_data[weight_idx];
+                                    const int weight_idx = weight_h_offset + (kw - w_low);
+                                    *grad_x_row++ += grad_val * weight_row[kw - w_low];
                                 }
+                                
+                                grad_x_ptr += in_width; // 下一行
                             }
                         }
                     }
@@ -1951,38 +3185,49 @@ std::vector<TensorPtr> Conv2dFunction::backward(const TensorPtr& grad_output) {
     // grad_weight
     if (weight->requires_grad()) {
         std::vector<float> grad_weight_data(weight->size(), 0.0f);
-        const float* grad_output_data = grad_output->data_ptr();
-        const float* x_data = x->data_ptr();
-
-        _Pragma("omp parallel for collapse(2)")
+        
+        // 优化5: 使用局部累加器减少原子操作
+        #pragma omp parallel for collapse(2)
         for (int oc = 0; oc < out_channels_; ++oc) {
             for (int ic = 0; ic < in_channels_; ++ic) {
-                for (int kh = 0; kh < kernel_size_; ++kh) {
-                    for (int kw = 0; kw < kernel_size_; ++kw) {
-                        for (int b = 0; b < batch_size; ++b) {
-                            for (int oh = 0; oh < out_height; ++oh) {
-                                const int ih = oh * stride_ + kh - padding_;
-                                if (ih < 0 || ih >= in_height) continue;
-                                
-                                for (int ow = 0; ow < out_width; ++ow) {
-                                    const int iw = ow * stride_ + kw - padding_;
-                                    if (iw < 0 || iw >= in_width) continue;
-                                    
-                                    const float grad_val = grad_output_data[
-                                        b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
-                                    
-                                    const float x_val = x_data[
-                                        b * in_b_stride + ic * in_c_stride + ih * in_width + iw];
-                                    
-                                    const int weight_idx = oc * weight_oc_stride + 
-                                                          ic * weight_ic_stride + 
-                                                          kh * kernel_size_ + kw;
-                                    
-                                    #pragma omp atomic
-                                    grad_weight_data[weight_idx] += grad_val * x_val;
+                // 为每个线程创建局部累加器
+                std::vector<float> local_grad(kernel_size_ * kernel_size_, 0.0f);
+                
+                for (int b = 0; b < batch_size; ++b) {
+                    const int in_base = b * in_b_stride + ic * in_c_stride;
+                    
+                    for (int oh = 0; oh < out_height; ++oh) {
+                        const int ih = oh * stride_ - padding_;
+                        if (ih < 0 || ih + kernel_size_ > in_height) continue;
+                        
+                        for (int ow = 0; ow < out_width; ++ow) {
+                            const int iw = ow * stride_ - padding_;
+                            if (iw < 0 || iw + kernel_size_ > in_width) continue;
+                            
+                            const float grad_val = grad_output_data[
+                                b * out_b_stride + oc * out_c_stride + oh * out_width + ow];
+                            
+                            // 优化6: 直接内存访问
+                            const float* x_ptr = x_data + in_base + ih * in_width + iw;
+                            
+                            // 优化7: 内层循环向量化
+                            #pragma omp simd
+                            for (int kh = 0; kh < kernel_size_; ++kh) {
+                                const int row_offset = kh * in_width;
+                                for (int kw = 0; kw < kernel_size_; ++kw) {
+                                    local_grad[kh * kernel_size_ + kw] += grad_val * x_ptr[row_offset + kw];
                                 }
                             }
                         }
+                    }
+                }
+                
+                // 合并局部累加器到全局梯度
+                const int weight_base = oc * weight_oc_stride + ic * weight_ic_stride;
+                #pragma omp critical
+                {
+                    for (int i = 0; i < kernel_size_ * kernel_size_; ++i) {
+                        grad_weight_data[weight_base + i] += local_grad[i];
                     }
                 }
             }

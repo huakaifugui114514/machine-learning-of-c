@@ -1,23 +1,23 @@
-#ifndef LOSS_MSE_LOSS_HPP
-#define LOSS_MSE_LOSS_HPP
-
-#include "loss.hpp"
+// mse_loss.hpp
+#pragma once
+#include <vector>
+#include <memory>
+#include "tensor.hpp"
 
 namespace dlt {
 namespace loss {
 
-class MSELoss : public LossFunction {
+class MSELoss {
 public:
-    TensorPtr forward(const TensorPtr& input, const TensorPtr& target) override;
-    std::vector<TensorPtr> backward() override;
-    
+    std::shared_ptr<Tensor> forward(const std::shared_ptr<Tensor>& input, 
+                                   const std::shared_ptr<Tensor>& target);
+    std::vector<std::shared_ptr<Tensor>> backward();
+
 private:
-    TensorPtr input_;
-    TensorPtr target_;
-    TensorPtr diff_; 
+    std::shared_ptr<Tensor> input_;
+    std::shared_ptr<Tensor> target_;
+    std::shared_ptr<Tensor> diff_;
 };
 
 } // namespace loss
 } // namespace dlt
-
-#endif // LOSS_MSE_LOSS_HPP

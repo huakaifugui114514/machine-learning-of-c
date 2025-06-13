@@ -24,6 +24,7 @@ TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& tar
     const auto& target_data = target->data();
     
     float total_loss = 0.0f;
+    softmax_output_ = std::make_shared<Tensor>(std::vector<float>(input->size()), input->shape(), false);
     
     for (int i = 0; i < batch_size; ++i) {
         // 找到最大值提高数值稳定性
@@ -41,9 +42,11 @@ TensorPtr CrossEntropyLoss::forward(const TensorPtr& input, const TensorPtr& tar
         
         // 计算交叉熵
         for (int j = 0; j < num_classes; ++j) {
+            float prob = logits[j] / exp_sum;
+            softmax_output_->data()[i * num_classes + j] = prob;
             if (target_data[i * num_classes + j] > 0) {
                 total_loss -= target_data[i * num_classes + j] * 
-                             std::log(logits[j] / (exp_sum + 1e-7f));
+                             std::log(prob + 1e-7f);
             }
         }
     }
@@ -56,26 +59,19 @@ std::vector<TensorPtr> CrossEntropyLoss::backward() {
         throw std::runtime_error("Must call forward() before backward()");
     }
 
-    const float epsilon = 1e-7f;
     const int batch_size = input_->shape()[0];
-    const int num_classes = input_->size() / batch_size;
+    const int num_classes = input_->shape()[1];
     
     std::vector<float> grad_data(input_->size());
-    const auto& input_data = input_->data();
     const auto& target_data = target_->data();
+    const auto& softmax_data = softmax_output_->data();
     
     // 计算梯度
     for (int i = 0; i < batch_size; ++i) {
         for (int j = 0; j < num_classes; ++j) {
             const int idx = i * num_classes + j;
-            float prob = std::clamp(input_data[idx], epsilon, 1.0f - epsilon);
-            grad_data[idx] = (prob - target_data[idx]) / (prob * (1 - prob));
+            grad_data[idx] = (softmax_data[idx] - target_data[idx]) / batch_size;
         }
-    }
-    
-    // 归一化梯度
-    for (float& val : grad_data) {
-        val /= batch_size;
     }
     
     return {tensor(grad_data, input_->shape())};
