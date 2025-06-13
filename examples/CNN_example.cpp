@@ -2,7 +2,7 @@
 #include "nn/pooling.hpp"
 #include "nn/linear.hpp"
 #include "loss/cross_entropy_loss.hpp"  
-#include "optimizer/sgd.hpp"  
+#include "optimizer/adam.hpp"  
 #include "ops.hpp"
 #include "tensor.hpp"
 #include "data/mnist_loader.hpp"
@@ -22,7 +22,6 @@ using namespace dlt::loss;
 using namespace dlt::optimizer;  
 using namespace dlt::data;
 
-// 定义CNN模型（支持批量处理）
 class MNISTCNN {
 public:
     Conv2d conv1;
@@ -30,24 +29,16 @@ public:
     Linear fc1;
 
     MNISTCNN()
-        : conv1(1, 16, 3, 1, 1), // 输入通道1，输出通道16，卷积核大小3，步长1，填充1
-          pool1(2, 2, 0),         // 池化核大小2，步长2，填充0
-          fc1(16 * 14 * 14, 10) {} // 输入特征数16 * 14 * 14，输出特征数10
+        : conv1(1, 16, 3, 1, 1),
+          pool1(2, 2, 0),
+          fc1(16 * 14 * 14, 10) {}
 
-    // 支持批量输入的前向传播
     TensorPtr forward(const TensorPtr& x) {
-        // 第一层卷积 + ReLU激活
         auto h = conv1.forward(x);
         h = relu(h);
-
-        // 池化层
         h = pool1.forward(h);
-
-        // 展平
         int batch_size = x->shape()[0];
         h = reshape(h, {batch_size, 16 * 14 * 14});
-
-        // 全连接层
         return fc1.forward(h);
     }
 
@@ -59,7 +50,6 @@ public:
     }
 };
 
-// 将标签转换为one-hot编码
 std::vector<float> to_one_hot(int label, int num_classes = 10) {
     std::vector<float> one_hot(num_classes, 0.0f);
     if (label >= 0 && label < num_classes) {
@@ -68,7 +58,6 @@ std::vector<float> to_one_hot(int label, int num_classes = 10) {
     return one_hot;
 }
 
-// 创建批次数据
 std::pair<std::vector<std::vector<float>>, std::vector<std::vector<float>>> 
 create_batches(const std::vector<std::vector<float>>& images, 
                const std::vector<int>& labels, 
@@ -78,29 +67,24 @@ create_batches(const std::vector<std::vector<float>>& images,
         throw std::runtime_error("Number of images and labels must be equal");
     }
 
-    // 创建索引
     std::vector<int> indices(num_samples);
     std::iota(indices.begin(), indices.end(), 0);
     
-    // 打乱数据
     if (shuffle) {
         std::random_device rd;
         std::mt19937 g(rd());
         std::shuffle(indices.begin(), indices.end(), g);
     }
 
-    // 创建批次
     std::vector<std::vector<float>> batch_images;
     std::vector<std::vector<float>> batch_labels;
     
     for (int i = 0; i < num_samples; i += batch_size) {
         int current_batch_size = std::min(batch_size, num_samples - i);
         
-        // 创建图像批次 (batch_size, 1, 28, 28)
         std::vector<float> image_batch;
         image_batch.reserve(current_batch_size * 1 * 28 * 28);
         
-        // 创建标签批次 (batch_size, 10)
         std::vector<float> label_batch;
         label_batch.reserve(current_batch_size * 10);
         
@@ -108,7 +92,6 @@ create_batches(const std::vector<std::vector<float>>& images,
             int idx = indices[i + j];
             image_batch.insert(image_batch.end(), images[idx].begin(), images[idx].end());
             
-            // 转换为one-hot编码
             auto one_hot = to_one_hot(labels[idx]);
             label_batch.insert(label_batch.end(), one_hot.begin(), one_hot.end());
         }
@@ -129,11 +112,12 @@ int main() {
     // 创建模型
     MNISTCNN model;
 
-    // 创建损失函数和优化器
+    // 创建损失函数和优化器（改为Adam）
     CrossEntropyLoss cross_entropy_loss;  
-    SGD optimizer(learning_rate);  
+    Adam optimizer(learning_rate);  // 使用Adam优化器
+    optimizer.add_parameters(model.parameters());  // 添加模型参数
 
-    // 使用MNISTLoader加载数据集
+    // 使用MNISTLoader加载数据集 - 恢复缺失的代码
     std::cout << "Loading training data...\n";
     auto train_images = MNISTLoader::load_images("../resources/mnist/train-images-idx3-ubyte/train-images.idx3-ubyte");
     auto train_labels = MNISTLoader::load_labels("../resources/mnist/train-labels-idx1-ubyte/train-labels.idx1-ubyte");
@@ -149,7 +133,7 @@ int main() {
     auto [test_image_batches, test_label_batches] = 
         create_batches(test_images, test_labels, batch_size, false);
 
-    const int num_batches = train_image_batches.size();
+    const int num_batches = train_image_batches.size();  // 定义num_batches
     std::cout << "Training batches: " << num_batches << std::endl;
 
     // 训练循环
@@ -160,7 +144,6 @@ int main() {
         for (int batch_idx = 0; batch_idx < num_batches; ++batch_idx) {
             optimizer.zero_grad();
             
-            // 创建批量张量
             auto batch_images = tensor(train_image_batches[batch_idx], 
                                       {static_cast<int>(train_image_batches[batch_idx].size()) / (28 * 28), 
                                        1, 28, 28}, true);
@@ -169,19 +152,13 @@ int main() {
                                       {static_cast<int>(train_label_batches[batch_idx].size()) / 10, 10}, 
                                       false);
             
-            // 前向传播
             TensorPtr output = model.forward(batch_images);
-            
-            // 计算损失
             TensorPtr loss = cross_entropy_loss.forward(output, batch_labels);
-            
-            // 反向传播
             loss->backward();
-            optimizer.step();
+            optimizer.step();  // 使用Adam更新参数
 
             epoch_loss += loss->data()[0];
             
-            // 每100个batch打印一次进度
             if (batch_idx % 100 == 0) {
                 std::cout << "Epoch [" << epoch + 1 << "/" << num_epochs
                           << "], Batch [" << batch_idx << "/" << num_batches
